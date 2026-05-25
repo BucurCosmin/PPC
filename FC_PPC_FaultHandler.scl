@@ -1,0 +1,190 @@
+// =============================================================================
+// FC_FaultHandler
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Runs LAST in the FC chain. Overrides the setpoints written by
+//   PowerDistribution and ReactiveControl for any inverter that is faulted,
+//   lost comms, or in a global stop condition.
+//
+//   Also writes OperMode and RemRdy_Spt to healthy inverters to keep them in
+//   the correct state (Operation / Ready) and to recover them after a stop.
+//
+// FOUR CONDITIONS HANDLED:
+//
+//   A) ForceStop = TRUE (EN_PPC = FALSE in the calling FB)
+//      → Stop ALL inverters immediately regardless of health.
+//      → Used when the operator disables the PPC controller entirely.
+//
+//   B) Plant_Mode = 2 (FALLBACK)
+//      → Stop ALL inverters. Comms to SCADA are lost; safe state is zero output.
+//      → Ramps_Pcmd is reset to 0 here so we ramp up from zero after recovery.
+//
+//   C) Individual CommError or Error (partial fault)
+//      → Stop only the faulted inverter; healthy inverters keep running.
+//      → PowerDistribution / ReactiveControl already set WSpt=0 for offline units;
+//        this FC additionally issues the OperMode=Stop command via the UDT.
+//
+//   D) Fault cleared (Error transitions TRUE → FALSE) — sequence S3
+//      → Write ErrClr = 26 (Ackn) exactly ONCE (one-shot, not continuous).
+//      → This is required for the inverter to auto-restart after a fault.
+//      → PrevError array (passed from FB static) tracks the previous Error state
+//        per inverter for rising/falling edge detection.
+//
+// SMA STOP SEQUENCE (from Modbus map interlock logic):
+//   To stop cleanly: write InvOpMod = 303 (Stop).
+//   Optionally also write RemRdy = 303 (Standby) to remove remote-ready permission.
+//   Writing only WSpt=0 is NOT sufficient — it can trigger PwrOffReas code 21626
+//   ("Low Power SetPoint") without properly stopping the inverter.
+//
+// SMA START / RECOVERY SEQUENCE:
+//   1. Write RemRdy = 308 (Ready)     → inverter enters remote-ready state
+//   2. Write OperMode = 308 (Operation) → inverter starts operating
+//   This FC writes only OperMode (field exists in the UDT). The comms block
+//   derives RemRdy from OperMode: OperMode=308 → also write RemRdy=308 first;
+//   OperMode=303 → also write RemRdy=303. The sequencing is handled in the
+//   comms layer, keeping RemRdy_Spt out of the UDT.
+//
+// RAMPS_PCMD RESET:
+//   If onlineCount = 0 (all inverters offline), Ramps_Pcmd is reset to 0.
+//   This prevents a large stale command from being sent when inverters recover —
+//   instead they will ramp up from zero at the configured P_RampUp rate.
+//
+// CALLED FROM: FB_PPC_Controller (step ⑥, last FC in chain)
+// =============================================================================
+
+FUNCTION "FC_PPC_FaultHandler" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Current plant mode. 2 = FALLBACK → stop all inverters.
+    Plant_Mode : INT;
+
+    // TRUE when EN_PPC = FALSE in the calling FB.
+    // Forces all inverters to stop regardless of Plant_Mode.
+    ForceStop : BOOL;
+END_VAR
+
+VAR_IN_OUT
+    // 10-element inverter array. OperMode, ErrClr and setpoints are written.
+    // RemRdy is derived from OperMode by the comms block (not a UDT field).
+    Inverters : Array[0..9] of "Inverter_controller";
+
+    // Reset to 0.0 when all inverters are offline so ramp restarts from zero.
+    Ramps_Pcmd : REAL;
+
+    // Previous Error state per inverter — stored in FB static section.
+    // Used for falling-edge detection to generate the ErrClr one-shot.
+    // Must be passed from FB so the state persists between OB30 cycles.
+    PrevError : Array[0..9] of BOOL;
+END_VAR
+
+VAR_OUTPUT
+    // TRUE if any inverter has an active fault or comms error.
+    // Mapped to FB_PPC_Controller output PPC_Fault → HMI alarm.
+    AnyFault : BOOL;
+END_VAR
+
+VAR_TEMP
+    i            : INT;   // Loop index
+    onlineCount  : INT;   // Healthy inverters after fault evaluation
+    globalStop   : BOOL;  // Combined ForceStop / FALLBACK flag
+    faultCleared : BOOL;  // TRUE when Error transitions 1→0 this cycle (one-shot trigger)
+END_VAR
+
+BEGIN
+
+    #AnyFault   := FALSE;
+    #onlineCount := 0;
+
+    // Global stop is active when either EN_PPC=FALSE or we are in FALLBACK
+    #globalStop := #ForceStop OR (#Plant_Mode = 2);
+
+    FOR #i := 0 TO 9 DO
+
+        // ── Falling-edge detection for ErrClr one-shot (sequence S3.3) ────────
+        // faultCleared = TRUE only in the single scan where Error goes 1→0.
+        // PrevError[i] is stored in the FB static section (passed as VAR_IN_OUT)
+        // so the state is retained between OB30 cycles.
+        #faultCleared  := #PrevError[#i] AND NOT #Inverters[#i].Error;
+        #PrevError[#i] := #Inverters[#i].Error;   // Update for next cycle
+
+        IF #globalStop THEN
+            // ── GLOBAL STOP: issue Stop to ALL inverters (sequence S4) ────────
+            // Covers ForceStop (EN_PPC=FALSE) and FALLBACK (comms lost).
+            // Comms block sees OperMode=303 and writes RemRdy=303 first (S4.1),
+            // then InvOpMod=303 (S4.2), satisfying the SMA stop interlock.
+            #Inverters[#i].OperMode := 303;   // Stop (InvOpMod)
+            #Inverters[#i].WSpt     := 0;
+            #Inverters[#i].VArSpt   := 0;
+            #Inverters[#i].PFSpt    := 0;
+            #Inverters[#i].WMode    := 303;   // Off
+            #Inverters[#i].VArMode  := 303;   // Off
+            #Inverters[#i].ErrClr   := 0;     // No acknowledgment during forced stop
+
+        ELSIF #Inverters[#i].CommError THEN
+            // ── INDIVIDUAL COMMS FAULT ────────────────────────────────────────
+            // Modbus link broken — write Stop as best-effort.
+            // Inverter's own internal watchdog will trip it if comms stay down.
+            #Inverters[#i].OperMode := 303;
+            #Inverters[#i].WSpt     := 0;
+            #Inverters[#i].VArSpt   := 0;
+            #Inverters[#i].PFSpt    := 0;
+            #Inverters[#i].WMode    := 303;
+            #Inverters[#i].VArMode  := 303;
+            #Inverters[#i].ErrClr   := 0;
+            #AnyFault := TRUE;
+
+        ELSIF #Inverters[#i].Error THEN
+            // ── ACTIVE INVERTER FAULT (sequence S3.1) ─────────────────────────
+            // ErrStt ≠ 0. Zero setpoints; do not stop healthy inverters.
+            // The inverter trips itself; we send no power demand to it.
+            // ErrNo (input register 96) should be logged by SCADA (S3.2).
+            #Inverters[#i].WSpt    := 0;
+            #Inverters[#i].VArSpt  := 0;
+            #Inverters[#i].PFSpt   := 0;
+            #Inverters[#i].ErrClr  := 0;   // Do not acknowledge while fault is active
+            #AnyFault := TRUE;
+
+        ELSE
+            // ── HEALTHY INVERTER ──────────────────────────────────────────────
+            // PowerDistribution and ReactiveControl have already written WSpt,
+            // VArSpt / PFSpt, WMode and VArMode for this inverter.
+
+            // ErrClr one-shot (sequence S3.3):
+            // Write 26 (Ackn) exactly once in the scan where Error cleared.
+            // Next scan faultCleared=FALSE, ErrClr returns to 0.
+            // The comms block writes this to Holding register 8 (one Modbus write).
+            // This allows the inverter to restart via sequence S1.
+            IF #faultCleared THEN
+                #Inverters[#i].ErrClr := 26;   // Ackn — one-shot, not continuous
+            ELSE
+                #Inverters[#i].ErrClr := 0;    // Idle
+            END_IF;
+
+            // OperMode=308: keep inverter in Operation (idempotent).
+            // Comms block writes RemRdy=308 first (S1.1), then InvOpMod=308 (S1.2).
+            #Inverters[#i].OperMode := 308;
+            #onlineCount := #onlineCount + 1;
+
+            // PwrOffReas supervision (sequence S2.6, register 178):
+            // A non-zero value means the inverter disconnected for a reason other
+            // than a normal stop command. Flag it so the HMI can display the code.
+            // The comms block reads PwrOffReas from input register 178 each cycle.
+            IF #Inverters[#i].PwrOffReas <> 0 THEN
+                #AnyFault := TRUE;
+            END_IF;
+
+        END_IF;
+
+    END_FOR;
+
+    // ── Reset ramp output when plant is completely offline ────────────────────
+    // If all inverters are stopped, faulted, or disabled, there is no production.
+    // Resetting Ramps_Pcmd to zero prevents a large stale setpoint being sent
+    // the moment any inverter comes back online — it will instead ramp up from 0.
+    IF #onlineCount = 0 THEN
+        #Ramps_Pcmd := 0.0;
+    END_IF;
+
+END_FUNCTION

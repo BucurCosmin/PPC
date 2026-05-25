@@ -1,0 +1,77 @@
+// =============================================================================
+// FC_PPC_ModeManager
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Determines the current Plant_Mode based on watchdog status and HMI override.
+//   The watchdog timer is managed in the calling FB (FB_PPC_Controller) so that
+//   this FC only needs a simple BOOL input instead of a timer IN_OUT parameter.
+//
+// PLANT_MODE VALUES:
+//   0 = LOCAL      — Targets come from HMI / local DB; no remote comms needed
+//   1 = REMOTE_IEC — Targets from upstream SCADA / grid operator via comms thread
+//   2 = FALLBACK   — Comms lost; ramp to zero and stop all inverters
+//
+// PRIORITY ORDER (highest first):
+//   1. LocalMode_Req = TRUE  →  force LOCAL  (operator manual override)
+//   2. WD_Expired = TRUE     →  force FALLBACK (communication lost)
+//   3. Otherwise             →  REMOTE_IEC (or recover from FALLBACK)
+//
+// MODE TRANSITIONS:
+//   LOCAL → REMOTE_IEC       : when LocalMode_Req cleared and comms healthy
+//   REMOTE_IEC → FALLBACK    : when watchdog timer expires (no new telegram)
+//   FALLBACK → REMOTE_IEC    : when comms restored (watchdog resets, WD_Expired FALSE)
+//   Any → LOCAL              : when operator asserts LocalMode_Req
+//
+// NOTE:
+//   Plant_Mode is VAR_IN_OUT — it persists in the calling FB's static section
+//   between OB30 cycles, so mode transitions are stable across scans.
+//
+// CALLED FROM: FB_PPC_Controller (step ②)
+// =============================================================================
+
+FUNCTION "FC_PPC_ModeManager" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // TRUE when the watchdog TON timer Q output is set — meaning no IEC_Watchdog
+    // edge has been detected for longer than Watchdog_Timeout (default 30 s).
+    // Computed in FB_PPC_Controller before calling this FC.
+    WD_Expired : BOOL;
+
+    // TRUE when the HMI LOCAL/REMOTE selector is in LOCAL position.
+    // Takes priority over all remote modes — operator always wins.
+    LocalMode_Req : BOOL;
+END_VAR
+
+VAR_IN_OUT
+    // Current plant operating mode. Stored in FB static section so it persists
+    // between OB30 scan cycles. Written here, read by all downstream FCs.
+    Plant_Mode : INT;
+END_VAR
+
+BEGIN
+
+    // ── Priority 1: HMI LOCAL override ───────────────────────────────────────
+    // Operator has switched to LOCAL on the HMI. Ignore watchdog and remote.
+    // Targets_P / Q / PF in LOCAL mode come from HMI tags (not Cmd_P etc.).
+    IF #LocalMode_Req THEN
+        #Plant_Mode := 0;  // LOCAL
+        RETURN;
+    END_IF;
+
+    // ── Priority 2: Communication watchdog expired → FALLBACK ────────────────
+    // No telegram received from upstream for > Watchdog_Timeout seconds.
+    // RampControl will force Targets_P to zero; FaultHandler will stop inverters.
+    IF #WD_Expired THEN
+        #Plant_Mode := 2;  // FALLBACK
+        RETURN;
+    END_IF;
+
+    // ── Priority 3: Communication healthy → REMOTE_IEC ───────────────────────
+    // This also handles automatic recovery from FALLBACK:
+    // once the watchdog resets (comms restored), we come here and switch back.
+    // RampControl will ramp Targets_P back up from its current Ramps_Pcmd value.
+    #Plant_Mode := 1;  // REMOTE_IEC
+
+END_FUNCTION

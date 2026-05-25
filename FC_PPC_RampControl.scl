@@ -1,0 +1,129 @@
+// =============================================================================
+// FC_PPC_RampControl
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Limits the rate of change of the active power command to protect:
+//     - Inverters from abrupt power steps
+//     - Grid from sudden generation changes
+//     - Transformers and cables from thermal shock
+//
+//   Takes the raw Targets_P (from upstream) and produces Ramps_Pcmd — a
+//   smoothed command that changes at most P_RampUp or P_RampDown kW per second.
+//
+// RAMP LOGIC:
+//   delta = Targets_P - Ramps_Pcmd  (error between target and current output)
+//
+//   If delta > 0  (need to increase power):
+//       Ramps_Pcmd += MIN(IN1:=delta, IN2:=P_RampUp × dt)
+//       → we climb toward the target, limited to P_RampUp kW/s
+//
+//   If delta < 0  (need to decrease power):
+//       absDelta := ABS(delta)
+//       Ramps_Pcmd -= MIN(IN1:=absDelta, IN2:=P_RampDown × CycleTime_s)
+//       → we descend toward the target, limited to P_RampDown kW/s
+//   Note: TIA Portal MIN/MAX require named parameters (IN1/IN2).
+//         ABS() cannot be nested inside MIN() — store result in a temp first.
+//         'dt' is a reserved TIA Portal keyword (DT type) — use CycleTime_s.
+//
+//   If delta = 0: already at target, no change.
+//
+// FALLBACK HANDLING:
+//   When Plant_Mode = 2 (FALLBACK), the effective target is forced to 0.0 kW
+//   so Ramps_Pcmd ramps down at the normal P_RampDown rate, reaching zero
+//   gracefully rather than switching off abruptly.
+//
+// OUTPUT CLAMPING:
+//   After ramping, Ramps_Pcmd is clamped to [0, PmaxPlant].
+//   PmaxPlant is the sum of online inverter WAval in kW (from InverterMonitor).
+//   This ensures we never command more than the inverters can currently deliver.
+//
+// PERSISTENCE:
+//   Ramps_Pcmd is VAR_IN_OUT — it is stored in FB_PPC_Controller static section
+//   and retains its value between OB30 cycles (the accumulation is intentional).
+//
+// CALLED FROM: FB_PPC_Controller (step ③)
+// =============================================================================
+
+FUNCTION "FC_PPC_RampControl" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Desired active power in kW from upstream (FB input Cmd_P).
+    // In FALLBACK mode this is ignored and 0.0 is used instead.
+    Targets_P : REAL;
+
+    // Total available plant active power in kW (sum of online WAval).
+    // Used as upper clamp for Ramps_Pcmd so we never over-command.
+    PmaxPlant : REAL;
+
+    // Maximum allowed rate of increase in kW per second.
+    // Stored in PPC_Controller DB (configurable at runtime via HMI).
+    P_RampUp : REAL;
+
+    // Maximum allowed rate of decrease in kW per second.
+    // Typically ≥ P_RampUp to allow faster curtailment if needed.
+    P_RampDown : REAL;
+
+    // OB30 cycle time in seconds — used to convert kW/s rate to kW per scan.
+    // Default: 0.1 s (100 ms OB30). Must match actual OB interval.
+    // NOTE: 'dt' is a TIA Portal reserved keyword (DT = Date_And_Time type).
+    CycleTime_s : REAL;
+
+    // Current plant mode — used to force target to 0 in FALLBACK.
+    Plant_Mode : INT;
+END_VAR
+
+VAR_IN_OUT
+    // The ramped output command in kW. Persists between cycles in FB static.
+    // DO NOT reset this between scans — the accumulation IS the ramp.
+    Ramps_Pcmd : REAL;
+END_VAR
+
+VAR_TEMP
+    delta           : REAL;   // Difference between target and current output
+    effectiveTarget : REAL;   // Target after FALLBACK override applied
+    maxStep         : REAL;   // Maximum kW change allowed this scan cycle
+    absDelta        : REAL;   // ABS(delta) — stored separately for MIN call
+END_VAR
+
+BEGIN
+
+    // ── FALLBACK: force target to zero ───────────────────────────────────────
+    // In FALLBACK we want to ramp down to zero, not jump.
+    // The normal ramp-down logic below will handle the descent rate.
+    IF #Plant_Mode = 2 THEN
+        #effectiveTarget := 0.0;
+    ELSE
+        #effectiveTarget := #Targets_P;
+    END_IF;
+
+    // ── Compute error between target and current ramped output ────────────────
+    #delta := #effectiveTarget - #Ramps_Pcmd;
+
+    // ── Apply ramp rate limit ─────────────────────────────────────────────────
+    IF #delta > 0.0 THEN
+        // Ramp UP: increase Ramps_Pcmd by at most P_RampUp × dt this scan
+        // TIA Portal MIN/MAX require named parameters IN1/IN2
+        #maxStep    := #P_RampUp * #CycleTime_s;
+        #Ramps_Pcmd := #Ramps_Pcmd + MIN(IN1 := #delta, IN2 := #maxStep);
+
+    ELSIF #delta < 0.0 THEN
+        // Ramp DOWN: decrease Ramps_Pcmd by at most P_RampDown × dt this scan
+        // ABS result stored in temp — TIA Portal does not allow ABS() nested inside MIN()
+        #maxStep    := #P_RampDown * #CycleTime_s;
+        #absDelta   := ABS(#delta);
+        #Ramps_Pcmd := #Ramps_Pcmd - MIN(IN1 := #absDelta, IN2 := #maxStep);
+
+    END_IF;
+    // If delta = 0.0: target already reached — Ramps_Pcmd unchanged.
+
+    // ── Clamp to available plant capacity ────────────────────────────────────
+    // Never command more than what the online inverters can deliver.
+    // PmaxPlant is updated every cycle by InverterMonitor.
+    #Ramps_Pcmd := MIN(IN1 := #Ramps_Pcmd, IN2 := #PmaxPlant);
+
+    // ── Clamp to zero — PV inverters cannot produce negative power ────────────
+    #Ramps_Pcmd := MAX(IN1 := #Ramps_Pcmd, IN2 := 0.0);
+
+END_FUNCTION

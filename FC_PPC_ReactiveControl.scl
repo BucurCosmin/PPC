@@ -1,0 +1,149 @@
+// =============================================================================
+// FC_PPC_ReactiveControl
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Distributes reactive power or power factor setpoints to all online inverters
+//   according to the selected control mode (Plant_VArMode).
+//
+// CONTROL MODES (Plant_VArMode):
+//   0 = Off        — no reactive control; VArSpt = 0, VArMode = Off (303)
+//   1 = Q setpoint — distribute Targets_Q proportionally by VArAval
+//   2 = PF setpoint — write uniform Targets_PF to all online inverters
+//
+// MODE 1 — PROPORTIONAL Q BY VArAval:
+//   Same algorithm as PowerDistribution uses for P/WAval:
+//       share_i  = VArAval_i / Σ(VArAval_j)   for all online j
+//       VArSpt_i = Targets_Q × share_i
+//   VArAval is in pu×10000 (same FIX4 format as WAval); unit cancels in ratio.
+//   VArSpt register unit is kVAr direct (FIX0, scaling = 1).
+//
+// MODE 2 — UNIFORM PF SETPOINT:
+//   A single power factor target is written identically to all online inverters.
+//   This is correct because PF = Q/S is a ratio: if every inverter targets the
+//   same PF, each one produces Q proportional to its active power output,
+//   achieving natural reactive power sharing without per-inverter calculation.
+//   PFSpt register: FIX4 format, scaling = 10000.
+//   Example: PF 0.950 lagging → write 9500; PF 1.000 → write 10000.
+//
+// CONTROL MODE REGISTER:
+//   VArMode (GriMng.VArMod) must be set before the setpoint is actioned.
+//   ENUM values: 303 = Off, 1072 = VArCtlCom, 1075 = PFCtlCom.
+//   The comms block writes mode and setpoint in the same Modbus transaction.
+//
+// FALLBACK:
+//   When Plant_Mode = 2, this FC returns immediately without writing.
+//   FaultHandler issues Stop to all inverters, which clears reactive output.
+//
+// CALLED FROM: FB_PPC_Controller (step ⑤)
+// =============================================================================
+
+FUNCTION "FC_PPC_ReactiveControl" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Reactive control mode selector (0 / 1 / 2) — from FB input Cmd_VArMode.
+    Plant_VArMode : INT;
+
+    // Total plant reactive power target in kVAr (positive = inductive, negative = capacitive).
+    // Used in mode 1 — distributed proportionally across online inverters.
+    Targets_Q : REAL;
+
+    // Plant power factor target (e.g. 0.95, 1.00, -0.98 for leading).
+    // Used in mode 2 — written uniformly to all online inverters.
+    Targets_PF : REAL;
+
+    // Current plant mode. If FALLBACK (2), skip reactive control entirely.
+    Plant_Mode : INT;
+END_VAR
+
+VAR_IN_OUT
+    // 10-element inverter array from DB39.
+    // VArSpt, PFSpt and VArMode are written by this FC.
+    Inverters : Array[0..9] of "Inverter_controller";
+END_VAR
+
+VAR_TEMP
+    i               : INT;    // Loop index
+    sumVArAval_raw  : DINT;   // Sum of raw VArAval (pu×10000) for online inverters
+    share           : REAL;   // This inverter's fraction of total reactive capacity
+    onlineAndOk     : BOOL;   // Reusable online-check flag
+END_VAR
+
+BEGIN
+
+    // ── Guard: skip in FALLBACK — FaultHandler owns the safe state ────────────
+    IF #Plant_Mode = 2 THEN
+        RETURN;
+    END_IF;
+
+    // ── Pre-compute VArAval sum for proportional Q mode (mode 1) ─────────────
+    // Computed unconditionally to keep the loop below simple.
+    // Negligible overhead on S7-1500 for 10 inverters.
+    #sumVArAval_raw := 0;
+    FOR #i := 0 TO 9 DO
+        IF  #Inverters[#i].Enabled
+        AND #Inverters[#i].RemReady
+        AND NOT #Inverters[#i].Error
+        AND NOT #Inverters[#i].CommError
+        THEN
+            #sumVArAval_raw := #sumVArAval_raw + #Inverters[#i].VArAval;
+        END_IF;
+    END_FOR;
+
+    // ── Write reactive setpoints to each inverter ─────────────────────────────
+    FOR #i := 0 TO 9 DO
+
+        #onlineAndOk := #Inverters[#i].Enabled
+                        AND #Inverters[#i].RemReady
+                        AND NOT #Inverters[#i].Error
+                        AND NOT #Inverters[#i].CommError;
+
+        IF #onlineAndOk THEN
+
+            CASE #Plant_VArMode OF
+
+                0:  // ── Mode 0: No reactive control ───────────────────────────
+                    // Clear setpoints and switch inverter reactive mode to Off.
+                    #Inverters[#i].VArSpt  := 0;
+                    #Inverters[#i].PFSpt   := 0;
+                    #Inverters[#i].VArMode := 303;   // Off (GriMng.VArMod = 303)
+
+                1:  // ── Mode 1: Q setpoint, distributed by VArAval ────────────
+                    // Share = VArAval_i / Σ VArAval_j
+                    // Both in pu×10000 → ratio is dimensionless (VArRtg cancels)
+                    IF #sumVArAval_raw > 0 THEN
+                        #share := DINT_TO_REAL(#Inverters[#i].VArAval)
+                                  / DINT_TO_REAL(#sumVArAval_raw);
+                        // VArSpt unit: kVAr direct (FIX0, scaling = 1)
+                        #Inverters[#i].VArSpt := REAL_TO_DINT(#Targets_Q * #share);
+                    ELSE
+                        // VArAval all zero: write zero until inverters report capacity
+                        #Inverters[#i].VArSpt := 0;
+                    END_IF;
+                    #Inverters[#i].VArMode := 1072;  // VArCtlCom — remote Q setpoint
+
+                2:  // ── Mode 2: PF setpoint, uniform across all online units ──
+                    // Same PF target for every inverter. Each inverter then produces
+                    // Q = P × tan(arccos(PF)), naturally proportional to its P output.
+                    //
+                    // PFSpt register: FIX4 format, scaling = 10000 (SMA convention)
+                    // Example: Targets_PF = 0.950 → PFSpt = 9500
+                    //          Targets_PF = 1.000 → PFSpt = 10000
+                    #Inverters[#i].PFSpt   := REAL_TO_DINT(#Targets_PF * 10000.0);
+                    #Inverters[#i].VArMode := 1075;  // PFCtlCom — remote PF setpoint
+
+            END_CASE;
+
+        ELSE
+            // ── Offline or faulted inverter: clear all reactive outputs ────────
+            // FaultHandler will additionally issue the Stop command.
+            #Inverters[#i].VArSpt  := 0;
+            #Inverters[#i].PFSpt   := 0;
+            #Inverters[#i].VArMode := 303;   // Off
+
+        END_IF;
+
+    END_FOR;
+
+END_FUNCTION

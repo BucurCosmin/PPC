@@ -1,0 +1,91 @@
+// =============================================================================
+// FC_PPC_InverterMonitor
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Scans all 10 inverters in the PPC_Inverters array and produces three plant-
+//   level summary values:
+//     - N_Online     : how many inverters are healthy and available
+//     - PmaxPlant    : total available active power in kW
+//     - QmaxPlant    : total available reactive power in kVAr
+//
+//   This FC must be called FIRST in the FB execution chain because all
+//   downstream FCs depend on N_Online, PmaxPlant and QmaxPlant.
+//
+// ONLINE CRITERIA (all four must be TRUE):
+//   Enabled   — operator has enabled this inverter in the PPC
+//   RemReady  — inverter feedback reports remote-ready (read from OpStt)
+//   NOT Error — no active inverter fault (ErrStt = Ok)
+//   NOT CommError — Modbus communication is healthy (set by comms block)
+//
+// SCALING:
+//   WAval and VArAval are stored as DInt in pu × 10000 format (SMA FIX4).
+//   Example: WAval = 8500  →  0.85 pu available.
+//   To convert to kW:   (WAval_raw  / 10000.0) × WRtg_kW
+//   To convert to kVAr: (VArAval_raw/ 10000.0) × WRtg_kW
+//   (VArRtg ≈ WRtg for same-model inverters — adjust if different)
+//
+// CALLED FROM: FB_PPC_Controller (step ①)
+// =============================================================================
+
+FUNCTION "FC_PPC_InverterMonitor" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Rated active power per inverter in kW.
+    // Read once from SMA Modbus register 184 at commissioning and stored in DB39.
+    // All inverters assumed to be the same model → single plant-level constant.
+    WRtg_kW : REAL;
+END_VAR
+
+VAR_IN_OUT
+    // The 10-element inverter array from DB39 (PPC_Controller.PPC_Inverters).
+    // Passed IN_OUT so the FC reads directly from the live DB without copying.
+    Inverters : Array[0..9] of "Inverter_controller";
+END_VAR
+
+VAR_OUTPUT
+    // Number of inverters that passed all four online criteria.
+    N_Online  : INT;
+    // Sum of available active power for all online inverters, in kW.
+    PmaxPlant : REAL;
+    // Sum of available reactive power for all online inverters, in kVAr.
+    QmaxPlant : REAL;
+END_VAR
+
+VAR_TEMP
+    i : INT;   // Loop index
+END_VAR
+
+BEGIN
+
+    // ── Initialize accumulators ───────────────────────────────────────────────
+    #N_Online  := 0;
+    #PmaxPlant := 0.0;
+    #QmaxPlant := 0.0;
+
+    // ── Scan every inverter slot ──────────────────────────────────────────────
+    FOR #i := 0 TO 9 DO
+
+        IF  #Inverters[#i].Enabled       // Operator enable in PPC config
+        AND #Inverters[#i].RemReady      // Inverter reports remote-ready
+        AND NOT #Inverters[#i].Error     // No active inverter fault
+        AND NOT #Inverters[#i].CommError // Modbus link is healthy
+        THEN
+            #N_Online := #N_Online + 1;
+
+            // WAval: available active power, SMA FIX4 format, unit = pu
+            // raw = 10000 means 1.00 pu (full rated power available)
+            // Multiply by WRtg_kW to get physical kW value
+            #PmaxPlant := #PmaxPlant
+                + (DINT_TO_REAL(#Inverters[#i].WAval) / 10000.0 * #WRtg_kW);
+
+            // VArAval: available reactive power, same FIX4 / pu scaling as WAval
+            // For same-model inverters the rated kVAr capacity equals WRtg_kW
+            #QmaxPlant := #QmaxPlant
+                + (DINT_TO_REAL(#Inverters[#i].VArAval) / 10000.0 * #WRtg_kW);
+        END_IF;
+
+    END_FOR;
+
+END_FUNCTION
