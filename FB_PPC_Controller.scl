@@ -10,25 +10,25 @@
 //   ②  FC_PPC_ModeManager        →  Plant_Mode  (LOCAL / REMOTE_IEC / FALLBACK)
 //   ③  FC_PPC_RampControl        →  Ramps_Pcmd  (rate-limited P command in kW)
 //   ④  FC_PPC_PowerDistribution  →  WSpt, WMode per inverter
-//   ⑤  FC_PPC_ReactiveControl    →  VArSpt / PFSpt / VArMode per inverter
-//   ⑥  FC_PPC_FaultHandler       →  OperMode, RemRdy_Spt overrides; AnyFault
+//   ⑤  FC_PPC_ReactiveControl    →  Ramps_Qcmd, VArSpt / PFSpt / VArMode per inverter
+//   ⑥  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
 //
-// DB39 USAGE:
-//   The inverter array (PPC_Controller.PPC_Inverters) is passed as VAR_IN_OUT
-//   to each FC that needs it. Plant-level scalars (ramp rates, WRtg_kW, etc.)
-//   are read directly from the DB by symbol name. After each FC, key internal
-//   values are mirrored back to DB39 so the HMI can display them.
+// DB39 FIELDS REQUIRED (user must add if not present):
+//   Q_RampUp     : REAL    — Q ramp rate up in kVAr/s
+//   Q_RampDown   : REAL    — Q ramp rate down in kVAr/s
+//   Ramps_Qcmd   : REAL    — mirrored ramped Q command for HMI trending
+//   AnyDerating  : BOOL    — mirrored derating alarm flag
+//   FaultMask    : WORD    — mirrored per-inverter fault bitmap (bit i = inverter i)
 //
-// WATCHDOG:
-//   The IEC_Watchdog input is a toggling bit that the upstream comms thread
-//   pulses once per received telegram. This FB detects the rising edge and
-//   resets a TON timer. If no edge arrives within Watchdog_Timeout (default 30 s),
-//   the timer Q output goes TRUE → ModeManager switches to FALLBACK.
+// LOCAL MODE:
+//   When Plant_Mode = 0 (LOCAL), the OB30 caller is responsible for supplying
+//   Cmd_P and Cmd_Q from the HMI DB rather than from the SCADA comms thread.
+//   The PLC logic itself does not switch the setpoint source.
 //
-// INPUTS FROM UPSTREAM COMMS THREAD (set by caller in OB30):
-//   Cmd_P, Cmd_Q, Cmd_PF  — setpoints from SCADA / grid operator
-//   Cmd_VArMode            — reactive control mode (0=Off / 1=Q / 2=PF)
-//   IEC_Watchdog           — heartbeat toggle bit
+// FALLBACK RECOVERY (S4 fix):
+//   When Plant_Mode transitions from FALLBACK (2) to REMOTE_IEC (1), both
+//   Ramps_Pcmd and Ramps_Qcmd are forced to 0. This ensures a clean ramp-up
+//   from zero regardless of whether any inverters stayed online during FALLBACK.
 //
 // CALLED FROM: OB30 (cyclic, 100 ms)
 // INSTANCE DB:  assign one DB when placing the FB call in OB30
@@ -47,93 +47,79 @@ VAR_INPUT
 
     // Heartbeat bit from the upstream Modbus/IEC comms thread.
     // Must toggle (0→1 edge) at least once per Watchdog_Timeout period.
-    // If no edge is detected, Plant_Mode goes to FALLBACK.
     IEC_Watchdog : BOOL;
 
-    // OB30 cycle time in seconds. Used by RampControl to convert kW/s → kW/scan.
-    // Set this to match the actual OB30 interval configured in TIA Portal.
-    // Default: 0.1 (100 ms).
+    // OB30 cycle time in seconds. Default: 0.1 (100 ms).
     CycleTime_s : REAL;
 
     // Active power target from upstream SCADA / grid operator, in kW.
-    // Passed through RampControl before reaching the inverters.
+    // In LOCAL mode: supplied by OB30 caller from HMI DB.
     Cmd_P : REAL;
 
     // Reactive power target in kVAr. Used when Cmd_VArMode = 1.
+    // In LOCAL mode: supplied by OB30 caller from HMI DB.
     Cmd_Q : REAL;
 
     // Power factor target (e.g. 0.95, 1.00). Used when Cmd_VArMode = 2.
-    // Sign convention: positive = lagging (inductive), negative = leading.
     Cmd_PF : REAL;
 
-    // Reactive control mode:
-    //   0 = Off          (VArMode = 303 on all inverters)
-    //   1 = Q setpoint   (distribute Cmd_Q proportionally by VArAval)
-    //   2 = PF setpoint  (write uniform Cmd_PF to all online inverters)
+    // Reactive control mode: 0 = Off, 1 = Q setpoint, 2 = PF setpoint.
     Cmd_VArMode : INT;
 
     // TRUE when HMI LOCAL/REMOTE selector is in LOCAL.
-    // Forces Plant_Mode = 0 (LOCAL) regardless of watchdog or comms.
     LocalMode_Req : BOOL;
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OUTPUTS  (visible to HMI, SCADA, and diagnostics)
+// OUTPUTS
 // ─────────────────────────────────────────────────────────────────────────────
 VAR_OUTPUT
-    // TRUE when Plant_Mode = 1 (REMOTE_IEC) — controller is active and following
-    // the upstream setpoints. Use this for HMI "PPC Running" indicator.
+    // TRUE when Plant_Mode = 1 (REMOTE_IEC) — controller active.
     PPC_Active : BOOL;
 
-    // TRUE when any inverter has an active fault or comms error.
-    // Maps to HMI alarm "PPC Fault".
+    // TRUE when any inverter has an active fault, comms error, or PwrOffReas ≠ 0.
     PPC_Fault : BOOL;
 
-    // Current Plant_Mode value (0/1/2). For HMI display and SCADA reporting.
+    // TRUE when any healthy inverter reports a non-zero derating state.
+    AnyDerating : BOOL;
+
+    // Current Plant_Mode (0/1/2). For HMI display.
     Mode_Out : INT;
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STATIC  (retained in FB instance DB between OB30 cycles)
+// STATIC  (retained between OB30 cycles)
 // ─────────────────────────────────────────────────────────────────────────────
 VAR
-    // IEC timer instance for the communication watchdog.
-    // Starts counting when no IEC_Watchdog edge is received.
-    // Q = TRUE when ET ≥ PT → communication lost → FALLBACK.
-    Watchdog_TON : TON;
-
-    // Stores the previous value of IEC_Watchdog for rising-edge detection.
-    // Edge = current IEC_Watchdog AND NOT this value.
+    Watchdog_TON     : TON;
     Watchdog_LastBit : BOOL;
-
-    // Watchdog timeout period. Configurable from HMI if needed.
-    // Default: 30 seconds. Reduce for tighter comms monitoring.
     Watchdog_Timeout : TIME := T#30S;
 
-    // Current plant operating mode. Persists between cycles.
-    //   0 = LOCAL      1 = REMOTE_IEC      2 = FALLBACK
-    Plant_Mode : INT;
+    Plant_Mode  : INT;
+    Ramps_Pcmd  : REAL;
+    Ramps_Qcmd  : REAL;
 
-    // Ramped active power command in kW. Accumulates across cycles.
-    // RampControl updates this each scan; it MUST persist (not a TEMP).
-    Ramps_Pcmd : REAL;
+    // Previous Plant_Mode — used to detect FALLBACK→REMOTE_IEC transition (S4).
+    PrevMode : INT;
 
-    // Previous Error state per inverter — used by FaultHandler for falling-edge
-    // detection to generate the ErrClr=26 one-shot (sequence S3.3).
-    // FCs have no static section, so this array lives here and is passed as VAR_IN_OUT.
+    // Previous Error state per inverter — for ErrClr one-shot edge detection (S3.3).
     PrevError_Arr : Array[0..9] of BOOL;
+
+    // Previous Enabled state per inverter — for ErrClr re-send on re-enable (M6).
+    PrevEnabled_Arr : Array[0..9] of BOOL;
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TEMP  (calculated fresh each OB30 cycle, not retained)
+// TEMP  (recalculated each OB30 cycle)
 // ─────────────────────────────────────────────────────────────────────────────
 VAR_TEMP
-    WD_EdgeDetected : BOOL;   // TRUE for exactly one cycle per IEC_Watchdog edge
-    WD_Expired      : BOOL;   // Copy of Watchdog_TON.Q output
-    N_Online        : INT;    // Online inverter count (from InverterMonitor)
-    PmaxPlant       : REAL;   // Total available P in kW (from InverterMonitor)
-    QmaxPlant       : REAL;   // Total available Q in kVAr (from InverterMonitor)
-    AnyFault        : BOOL;   // Fault flag (from FaultHandler)
+    WD_EdgeDetected : BOOL;
+    WD_Expired      : BOOL;
+    N_Online        : INT;
+    PmaxPlant       : REAL;
+    QmaxPlant       : REAL;
+    AnyFault_Tmp    : BOOL;
+    FaultMask       : WORD;
 END_VAR
 
 
@@ -142,28 +128,34 @@ BEGIN
     // =========================================================================
     // GUARD: PPC disabled (EN_PPC = FALSE)
     // =========================================================================
-    // When the operator disables the PPC, stop all inverters immediately and
-    // reset internal state so the next enable starts cleanly from zero.
     IF NOT #EN_PPC THEN
         "FC_PPC_FaultHandler"(
-            Plant_Mode := #Plant_Mode,
-            ForceStop  := TRUE,                          // Stop everything
-            Inverters  := "PPC_Controller".Inverters.PPC_Inverters,
-            Ramps_Pcmd := #Ramps_Pcmd,
-            PrevError  := #PrevError_Arr,
-            AnyFault   => #AnyFault
+            Plant_Mode  := #Plant_Mode,
+            ForceStop   := TRUE,
+            Inverters   := "PPC_Controller".Inverters.PPC_Inverters,
+            Ramps_Pcmd  := #Ramps_Pcmd,
+            Ramps_Qcmd  := #Ramps_Qcmd,
+            PrevError   := #PrevError_Arr,
+            PrevEnabled := #PrevEnabled_Arr,
+            AnyFault    => #AnyFault_Tmp,
+            AnyDerating => #AnyDerating,
+            FaultMask   => #FaultMask
         );
-        // Reset mode and ramp so re-enable starts from a known clean state
-        #Plant_Mode  := 0;     // Return to LOCAL when re-enabled
-        #Ramps_Pcmd  := 0.0;   // Ramp restarts from 0 on next enable
+        #Plant_Mode := 0;
+        #Ramps_Pcmd := 0.0;
+        #Ramps_Qcmd := 0.0;
+        #PrevMode   := 0;
         // Write outputs
         #PPC_Active  := FALSE;
-        #PPC_Fault   := #AnyFault;
+        #PPC_Fault   := #AnyFault_Tmp;
         #Mode_Out    := 0;
-        // Mirror to DB for HMI
+        // Mirror to DB
         "PPC_Controller".Plant_Mode   := 0;
         "PPC_Controller".Ramps_Pcmd   := 0.0;
-        "PPC_Controller".AnyFault     := #AnyFault;
+        "PPC_Controller".Ramps_Qcmd   := 0.0;
+        "PPC_Controller".AnyFault     := #AnyFault_Tmp;
+        "PPC_Controller".AnyDerating  := #AnyDerating;
+        "PPC_Controller".FaultMask    := #FaultMask;
         RETURN;
     END_IF;
 
@@ -171,46 +163,28 @@ BEGIN
     // =========================================================================
     // WATCHDOG — Rising-edge detection and TON timer management
     // =========================================================================
-    // The upstream comms thread toggles IEC_Watchdog once per received telegram.
-    // We detect each 0→1 transition and use it to reset the TON timer.
-    //
-    // HOW TON WORKS HERE:
-    //   IN = FALSE → timer immediately resets (ET = 0, Q = FALSE)
-    //   IN = TRUE  → timer starts counting up
-    //   When ET ≥ PT → Q = TRUE (watchdog expired)
-    //
-    // By pulsing IN=FALSE for one scan on each edge, we restart the countdown
-    // from zero on every new telegram. If telegrams stop, IN stays TRUE and
-    // the timer counts up until Q trips → FALLBACK.
-
-    // Detect rising edge of IEC_Watchdog heartbeat
     #WD_EdgeDetected  := #IEC_Watchdog AND NOT #Watchdog_LastBit;
-    #Watchdog_LastBit := #IEC_Watchdog;   // Store for next cycle
+    #Watchdog_LastBit := #IEC_Watchdog;
 
     IF #WD_EdgeDetected THEN
-        // New telegram received: reset watchdog timer to zero
         #Watchdog_TON(IN := FALSE, PT := #Watchdog_Timeout);
     ELSE
-        // No new edge this cycle: let timer count up toward timeout
         #Watchdog_TON(IN := TRUE,  PT := #Watchdog_Timeout);
     END_IF;
 
-    #WD_Expired := #Watchdog_TON.Q;   // TRUE when no telegram for > Watchdog_Timeout
+    #WD_Expired := #Watchdog_TON.Q;
 
 
     // =========================================================================
     // ①  FC_PPC_InverterMonitor
     // =========================================================================
-    // Scans all 10 inverters. Determines which are online and sums their
-    // available power. Must run first — all downstream FCs read these results.
     "FC_PPC_InverterMonitor"(
-        WRtg_kW   := "PPC_Controller".WRtg_kW,        // Rated kW per inverter (from DB39)
-        Inverters  := "PPC_Controller".Inverters.PPC_Inverters,  // The live 10-inverter array
-        N_Online   => #N_Online,                       // Result: online count
-        PmaxPlant  => #PmaxPlant,                      // Result: available P in kW
-        QmaxPlant  => #QmaxPlant                       // Result: available Q in kVAr
+        WRtg_kW   := "PPC_Controller".WRtg_kW,
+        Inverters  := "PPC_Controller".Inverters.PPC_Inverters,
+        N_Online   => #N_Online,
+        PmaxPlant  => #PmaxPlant,
+        QmaxPlant  => #QmaxPlant
     );
-    // Mirror to DB39 so HMI can display plant availability
     "PPC_Controller".Plant_N_Online   := #N_Online;
     "PPC_Controller".Limits_PmaxPlant := #PmaxPlant;
     "PPC_Controller".Limits_QmaxPlant := #QmaxPlant;
@@ -219,45 +193,45 @@ BEGIN
     // =========================================================================
     // ②  FC_PPC_ModeManager
     // =========================================================================
-    // Determines Plant_Mode from watchdog status and HMI override.
-    // Priority: LOCAL override > FALLBACK (comms lost) > REMOTE_IEC.
-    // Plant_Mode is passed as VAR_IN_OUT — it persists in FB static between cycles.
     "FC_PPC_ModeManager"(
-        WD_Expired    := #WD_Expired,     // Watchdog timeout flag
-        LocalMode_Req := #LocalMode_Req,  // HMI LOCAL selector
-        Plant_Mode    := #Plant_Mode      // VAR_IN_OUT: mode updated here
+        WD_Expired    := #WD_Expired,
+        LocalMode_Req := #LocalMode_Req,
+        Plant_Mode    := #Plant_Mode
     );
-    "PPC_Controller".Plant_Mode := #Plant_Mode;   // Mirror to DB for HMI
+    "PPC_Controller".Plant_Mode := #Plant_Mode;
+
+    // ── S4: Reset ramps on FALLBACK → REMOTE_IEC transition ──────────────────
+    // Force both ramps to 0 whenever comms recover from FALLBACK, ensuring
+    // a clean ramp-up from zero regardless of inverter state during FALLBACK.
+    IF (#PrevMode = 2) AND (#Plant_Mode <> 2) THEN
+        #Ramps_Pcmd := 0.0;
+        #Ramps_Qcmd := 0.0;
+    END_IF;
+    #PrevMode := #Plant_Mode;
 
 
     // =========================================================================
     // ③  FC_PPC_RampControl
     // =========================================================================
-    // Applies ramp rate limiting to Cmd_P to produce Ramps_Pcmd.
-    // In FALLBACK mode, forces effective target to 0 and ramps down.
-    // Ramps_Pcmd is VAR_IN_OUT and persists between cycles — the accumulation
-    // IS the ramp; do not reset it between calls.
     "FC_PPC_RampControl"(
-        Targets_P  := #Cmd_P,                          // Raw target from upstream
-        PmaxPlant  := #PmaxPlant,                      // Upper clamp (available kW)
-        P_RampUp    := "PPC_Controller".P_RampUp,       // kW/s from DB39
-        P_RampDown  := "PPC_Controller".P_RampDown,    // kW/s from DB39
-        CycleTime_s := #CycleTime_s,                   // OB30 interval in seconds
-        Plant_Mode := #Plant_Mode,                     // Checked for FALLBACK
-        Ramps_Pcmd := #Ramps_Pcmd                      // VAR_IN_OUT: accumulates
+        Targets_P   := #Cmd_P,
+        PmaxPlant   := #PmaxPlant,
+        P_RampUp    := "PPC_Controller".P_RampUp,
+        P_RampDown  := "PPC_Controller".P_RampDown,
+        CycleTime_s := #CycleTime_s,
+        Plant_Mode  := #Plant_Mode,
+        Ramps_Pcmd  := #Ramps_Pcmd
     );
-    "PPC_Controller".Ramps_Pcmd := #Ramps_Pcmd;   // Mirror for HMI trending
+    "PPC_Controller".Ramps_Pcmd := #Ramps_Pcmd;
 
 
     // =========================================================================
     // ④  FC_PPC_PowerDistribution
     // =========================================================================
-    // Splits Ramps_Pcmd proportionally by WAval across online inverters.
-    // Writes WSpt (kW) and WMode (1079 = WCtlCom) to each online inverter slot.
-    // Returns immediately without writing if Plant_Mode = FALLBACK.
     "FC_PPC_PowerDistribution"(
         Ramps_Pcmd := #Ramps_Pcmd,
         Plant_Mode := #Plant_Mode,
+        WRtg_kW    := "PPC_Controller".WRtg_kW,
         Inverters  := "PPC_Controller".Inverters.PPC_Inverters
     );
 
@@ -265,43 +239,46 @@ BEGIN
     // =========================================================================
     // ⑤  FC_PPC_ReactiveControl
     // =========================================================================
-    // Distributes Q proportionally by VArAval (mode 1), writes uniform PF
-    // setpoint (mode 2), or clears reactive outputs (mode 0).
-    // Returns immediately without writing if Plant_Mode = FALLBACK.
     "FC_PPC_ReactiveControl"(
         Plant_VArMode := #Cmd_VArMode,
         Targets_Q     := #Cmd_Q,
         Targets_PF    := #Cmd_PF,
         Plant_Mode    := #Plant_Mode,
-        Inverters     := "PPC_Controller".Inverters.PPC_Inverters
+        Q_RampUp      := "PPC_Controller".Q_RampUp,
+        Q_RampDown    := "PPC_Controller".Q_RampDown,
+        CycleTime_s   := #CycleTime_s,
+        QmaxPlant     := #QmaxPlant,
+        Inverters     := "PPC_Controller".Inverters.PPC_Inverters,
+        Ramps_Qcmd    := #Ramps_Qcmd
     );
+    "PPC_Controller".Ramps_Qcmd := #Ramps_Qcmd;
 
 
     // =========================================================================
     // ⑥  FC_PPC_FaultHandler  (always last)
     // =========================================================================
-    // Overrides faulted / CommError inverters to safe state.
-    // In FALLBACK: stops ALL inverters (setpoints already cleared by ①-⑤ returning
-    // early; FaultHandler writes OperMode=Stop and RemRdy=Standby).
-    // For healthy inverters: writes OperMode=308 and RemRdy_Spt=308 to keep
-    // them in Operation (or to re-start them after recovery).
-    // Resets Ramps_Pcmd to 0 if no inverters are online (clean restart on recovery).
     "FC_PPC_FaultHandler"(
-        Plant_Mode := #Plant_Mode,
-        ForceStop  := FALSE,                             // Normal cycle (not force-stop)
-        Inverters  := "PPC_Controller".Inverters.PPC_Inverters,
-        Ramps_Pcmd := #Ramps_Pcmd,
-        PrevError  := #PrevError_Arr,
-        AnyFault   => #AnyFault
+        Plant_Mode  := #Plant_Mode,
+        ForceStop   := FALSE,
+        Inverters   := "PPC_Controller".Inverters.PPC_Inverters,
+        Ramps_Pcmd  := #Ramps_Pcmd,
+        Ramps_Qcmd  := #Ramps_Qcmd,
+        PrevError   := #PrevError_Arr,
+        PrevEnabled := #PrevEnabled_Arr,
+        AnyFault    => #AnyFault_Tmp,
+        AnyDerating => #AnyDerating,
+        FaultMask   => #FaultMask
     );
-    "PPC_Controller".AnyFault := #AnyFault;   // Mirror for HMI alarm
+    "PPC_Controller".AnyFault    := #AnyFault_Tmp;
+    "PPC_Controller".AnyDerating := #AnyDerating;
+    "PPC_Controller".FaultMask   := #FaultMask;
 
 
     // =========================================================================
     // OUTPUT ASSIGNMENTS
     // =========================================================================
     #Mode_Out   := #Plant_Mode;
-    #PPC_Active := (#Plant_Mode = 1);   // TRUE only in REMOTE_IEC mode
-    #PPC_Fault  := #AnyFault;
+    #PPC_Active := (#Plant_Mode = 1);
+    #PPC_Fault  := #AnyFault_Tmp;
 
 END_FUNCTION_BLOCK

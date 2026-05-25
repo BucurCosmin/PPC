@@ -17,8 +17,20 @@
 //   the share ratio, the /10000.0 scaling and the WRtg_kW factor cancel out
 //   because both numerator and denominator carry the same units. This means
 //   we can use raw DInt values directly for the ratio calculation — no unit
-//   conversion needed. WRtg_kW is only needed for the absolute kW limit in
-//   RampControl (PmaxPlant), not here.
+//   conversion needed. WRtg_kW is used here only for the per-inverter WSpt
+//   clamp (see below).
+//
+// PER-INVERTER WSpt CLAMP (S3 fix):
+//   After computing the proportional share, WSpt is clamped to the inverter's
+//   own WAval-derived limit. This prevents WSpt > WAval in the one scan cycle
+//   where a CommError or fault reduces online capacity but Ramps_Pcmd hasn't
+//   been updated yet. Writing WSpt > WAval can trigger SMA PwrOffReas codes.
+//       maxWSpt_i = (WAval_i / 10000) × WRtg_kW   [kW]
+//
+// ONLINE CRITERIA:
+//   Enabled, RemReady, NOT Error, NOT CommError, PwrOffReas = 0.
+//   PwrOffReas ≠ 0 means the inverter disconnected abnormally; exclude it
+//   from distribution the same as a faulted unit.
 //
 //   RESULT:
 //   Inverters with more available capacity receive a larger setpoint.
@@ -53,6 +65,10 @@ VAR_INPUT
 
     // Current plant mode. If FALLBACK (2), skip distribution entirely.
     Plant_Mode : INT;
+
+    // Rated active power per inverter in kW (same value as in InverterMonitor).
+    // Used to convert WAval (pu×10000) to kW for the per-inverter WSpt clamp.
+    WRtg_kW : REAL;
 END_VAR
 
 VAR_IN_OUT
@@ -65,6 +81,7 @@ VAR_TEMP
     sumWAval_raw : DINT;   // Sum of raw WAval DInt for all online inverters
     share        : REAL;   // This inverter's fraction of total available power
     onlineAndOk  : BOOL;   // Reusable online-check result for this inverter slot
+    maxWSpt      : DINT;   // Per-inverter WSpt ceiling derived from WAval × WRtg_kW
 END_VAR
 
 BEGIN
@@ -83,6 +100,7 @@ BEGIN
         AND #Inverters[#i].RemReady
         AND NOT #Inverters[#i].Error
         AND NOT #Inverters[#i].CommError
+        AND (#Inverters[#i].PwrOffReas = 0)
         THEN
             #sumWAval_raw := #sumWAval_raw + #Inverters[#i].WAval;
         END_IF;
@@ -94,7 +112,8 @@ BEGIN
         #onlineAndOk := #Inverters[#i].Enabled
                         AND #Inverters[#i].RemReady
                         AND NOT #Inverters[#i].Error
-                        AND NOT #Inverters[#i].CommError;
+                        AND NOT #Inverters[#i].CommError
+                        AND (#Inverters[#i].PwrOffReas = 0);
 
         IF #onlineAndOk AND (#sumWAval_raw > 0) THEN
             // Compute this inverter's proportional share (0.0 to 1.0)
@@ -105,6 +124,13 @@ BEGIN
             // WSpt is kW direct (FIX0, scaling = 1).
             // Ramps_Pcmd is kW → multiply gives kW → REAL_TO_DINT for register.
             #Inverters[#i].WSpt := REAL_TO_DINT(#Ramps_Pcmd * #share);
+
+            // Clamp to inverter's own available capacity.
+            // Prevents WSpt > WAval in the one scan where online count drops
+            // (e.g. CommError just went TRUE) before RampControl has updated.
+            #maxWSpt := REAL_TO_DINT(DINT_TO_REAL(#Inverters[#i].WAval)
+                                     / 10000.0 * #WRtg_kW);
+            #Inverters[#i].WSpt := MIN(IN1 := #Inverters[#i].WSpt, IN2 := #maxWSpt);
 
             // WMode = 1079 (WCtlCom): inverter accepts WSpt from Modbus.
             // Must be set to this value; otherwise the inverter ignores WSpt writes.

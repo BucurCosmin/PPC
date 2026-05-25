@@ -11,11 +11,12 @@
 //   This FC must be called FIRST in the FB execution chain because all
 //   downstream FCs depend on N_Online, PmaxPlant and QmaxPlant.
 //
-// ONLINE CRITERIA (all four must be TRUE):
-//   Enabled   — operator has enabled this inverter in the PPC
-//   RemReady  — inverter feedback reports remote-ready (read from OpStt)
-//   NOT Error — no active inverter fault (ErrStt = Ok)
-//   NOT CommError — Modbus communication is healthy (set by comms block)
+// ONLINE CRITERIA (all five must be TRUE):
+//   Enabled          — operator has enabled this inverter in the PPC
+//   RemReady         — inverter feedback reports remote-ready (read from OpStt)
+//   NOT Error        — no active inverter fault (ErrStt = Ok)
+//   NOT CommError    — Modbus communication is healthy (set by comms block)
+//   PwrOffReas = 0   — inverter did not disconnect abnormally
 //
 // SCALING:
 //   WAval and VArAval are stored as DInt in pu × 10000 format (SMA FIX4).
@@ -67,10 +68,11 @@ BEGIN
     // ── Scan every inverter slot ──────────────────────────────────────────────
     FOR #i := 0 TO 9 DO
 
-        IF  #Inverters[#i].Enabled       // Operator enable in PPC config
-        AND #Inverters[#i].RemReady      // Inverter reports remote-ready
-        AND NOT #Inverters[#i].Error     // No active inverter fault
-        AND NOT #Inverters[#i].CommError // Modbus link is healthy
+        IF  #Inverters[#i].Enabled              // Operator enable in PPC config
+        AND #Inverters[#i].RemReady             // Inverter reports remote-ready
+        AND NOT #Inverters[#i].Error            // No active inverter fault
+        AND NOT #Inverters[#i].CommError        // Modbus link is healthy
+        AND (#Inverters[#i].PwrOffReas = 0)     // No abnormal disconnection reason
         THEN
             #N_Online := #N_Online + 1;
 
