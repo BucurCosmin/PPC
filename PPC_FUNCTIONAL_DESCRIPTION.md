@@ -18,7 +18,7 @@ OB30 (every 100 ms)
         ├─ ③ FC_PPC_RampControl         Rate-limit Cmd_P → Ramps_Pcmd
         ├─ ④ FC_PPC_PowerDistribution   Distribute Ramps_Pcmd by WAval → WSpt per inverter
         ├─ ⑤ FC_PPC_ReactiveControl     Distribute Q/PF by VArAval → VArSpt/PFSpt per inverter
-        └─ ⑥ FC_PPC_FaultHandler        Override faulted inverters → OperMode/RemRdy_Spt
+        └─ ⑥ FC_PPC_FaultHandler        Override faulted inverters → OperMode, ErrClr; AnyFault, AnyDerating, FaultMask
 ```
 
 **Call order is mandatory.** Each FC reads outputs produced by the previous one. Reversing or skipping steps will produce incorrect or unsafe behaviour.
@@ -345,7 +345,7 @@ FOR i = 0 TO 9:
 
 ### ⑥ FC_PPC_FaultHandler
 
-**Purpose:** Runs last in the chain. Overrides the setpoints written by FCs ④ and ⑤ for any inverter that is faulted, in comms error, or subject to a global stop command. Also manages the `OperMode` and `RemRdy_Spt` registers that control the SMA inverter run/stop state.
+**Purpose:** Runs last in the chain. Overrides the setpoints written by FCs ④ and ⑤ for any inverter that is faulted, in comms error, or subject to a global stop condition. Writes `OperMode` to keep healthy inverters in Operation and to recover them after a fault.
 
 **Inputs:**
 | Parameter | Type | Source | Description |
@@ -356,30 +356,38 @@ FOR i = 0 TO 9:
 **In/Out:**
 | Parameter | Type | Description |
 |---|---|---|
-| `Inverters` | Array | OperMode, RemRdy_Spt (and setpoints for faulted units) written |
-| `Ramps_Pcmd` | Real | Reset to 0.0 if all inverters are offline |
+| `Inverters` | Array | OperMode, ErrClr and setpoints written per-inverter |
+| `Ramps_Pcmd` | Real | Reset to 0.0 when all inverters are offline |
+| `Ramps_Qcmd` | Real | Reset to 0.0 when all inverters are offline |
+| `PrevError` | Array[0..9] of Bool | Previous Error state per inverter — stored in FB static for ErrClr edge detection |
+| `PrevEnabled` | Array[0..9] of Bool | Previous Enabled state per inverter — stored in FB static for re-enable ErrClr logic |
 
 **Outputs:**
 | Parameter | Type | Description |
 |---|---|---|
-| `AnyFault` | Bool | TRUE if any inverter has an active fault or comms error |
+| `AnyFault` | Bool | TRUE if any inverter has CommError, Error, or PwrOffReas ≠ 0 |
+| `AnyDerating` | Bool | TRUE if any healthy inverter has DrtStt ≠ 0 (thermal / grid derating) |
+| `FaultMask` | Word | Bit i = inverter i has active CommError or Error |
 
-**Logic — per inverter, four cases:**
+**Logic — per inverter, five cases:**
 
 | Condition | Action |
 |---|---|
-| `ForceStop OR Plant_Mode = 2` | Write Stop to ALL inverters: OperMode=303, WSpt=0, VArSpt=0, WMode=303, VArMode=303. Comms block derives RemRdy=303 from OperMode. |
-| `CommError = TRUE` | Same Stop writes as global stop; set AnyFault=TRUE. Best-effort — inverter's own watchdog will trip it if comms stay down. |
-| `Error = TRUE` | Zero WSpt, VArSpt, PFSpt only; set AnyFault=TRUE. Do not stop healthy inverters — partial plant keeps running. |
-| Healthy | Write OperMode=308. Comms block sees this and writes RemRdy=308 first, then InvOpMod=308 (SMA start interlock). Idempotent — safe every cycle. |
+| `ForceStop OR Plant_Mode = 2` | Stop ALL: OperMode=303, WSpt=0, VArSpt=0, WMode=303, VArMode=303, ErrClr=0. Comms block writes RemRdy=303 before InvOpMod=303. |
+| `CommError = TRUE` | Same stop writes; AnyFault=TRUE; set FaultMask bit. Best-effort — inverter's own Modbus watchdog trips it if comms stay down. |
+| `Error = TRUE` | Zero WSpt, VArSpt, PFSpt, ErrClr=0; AnyFault=TRUE; set FaultMask bit. Other inverters keep running. |
+| Healthy, `PwrOffReas ≠ 0` | OperMode=308; zero setpoints; AnyFault=TRUE. Inverter disconnected abnormally — excluded from distribution but kept in Operation so it can recover. |
+| Healthy, `PwrOffReas = 0` | OperMode=308; increment onlineCount. ErrClr=26 one-shot when Error clears (S3.3) or when Enabled rises after fault (M6). DrtStt ≠ 0 → AnyDerating=TRUE. |
 
-**RemRdy handling:** `RemRdy_Spt` is not a field in the `Inverter_controller` UDT. The comms block derives the required `RemRdy` register value from `OperMode`: when it prepares to write `InvOpMod=308` it first writes `RemRdy=308`; when it writes `InvOpMod=303` it also writes `RemRdy=303`. This keeps the SMA start/stop interlock in the comms layer without requiring an extra UDT field.
+**RemRdy handling:** `RemRdy_Spt` is NOT a field in the `Inverter_controller` UDT and is not written by any PPC FC. The comms block derives the required SMA `RemRdy` register value from `OperMode`: OperMode=308 → write RemRdy=308 first then InvOpMod=308; OperMode=303 → write RemRdy=303 first then InvOpMod=303. This keeps the SMA start/stop interlock entirely in the comms layer.
 
-**Why writing OperMode=308 every cycle to healthy inverters is safe:**
-The SMA inverter ignores re-writes of its current state. Writing 308 when already in Operation has no effect. Writing 308 after a recovery (inverter was stopped) re-starts it without any manual intervention.
+**ErrClr one-shot (sequence S3.3):** Write 26 (Ackn) to UDT field `ErrClr` for exactly one scan when Error transitions 1→0. Also re-sent when `Enabled` transitions FALSE→TRUE while Error is clear, in case the one-shot fired while the inverter was disabled. The comms block maps `ErrClr` to SMA Holding Register 8.
 
-**Ramps_Pcmd reset:**
-If the online inverter count drops to zero (all stopped, faulted, or disabled), `Ramps_Pcmd` is reset to 0.0. This ensures that when inverters come back online they receive setpoints that ramp up from zero at the configured P_RampUp rate, rather than jumping to whatever large value Ramps_Pcmd had accumulated.
+**Why writing OperMode=308 every cycle is safe:**
+The SMA inverter ignores re-writes of its current state. Writing 308 when already in Operation has no effect. Writing 308 after a stop re-starts the inverter automatically without manual intervention.
+
+**Ramps reset:**
+When `onlineCount = 0` (all inverters offline), both `Ramps_Pcmd` and `Ramps_Qcmd` are reset to 0.0, ensuring a clean ramp-up from zero when inverters recover.
 
 ---
 
@@ -453,7 +461,7 @@ After each FC call, the FB writes key internal values back to DB39 so the HMI ca
 
 ## 6. Comms Layer Separation
 
-The PPC FCs write only to UDT fields in the `PPC_Inverters` array (e.g. `WSpt`, `WMode`, `OperMode`, `RemRdy_Spt`). A separate Modbus comms block — outside the PPC FB — reads these fields and maps them to the actual Modbus holding register writes (FC16) each cycle. Feedback values (`WAval`, `VArAval`, `Wactive`, `RemReady`, `Error`, etc.) are read from the inverter input registers (FC04) by the same comms block and written into the UDT.
+The PPC FCs write only to UDT fields in the `PPC_Inverters` array (e.g. `WSpt`, `WMode`, `OperMode`, `ErrClr`). A separate Modbus comms block — outside the PPC FB — reads these fields and maps them to the actual Modbus holding register writes (FC16) each cycle. Feedback values (`WAval`, `VArAval`, `Wactive`, `RemReady`, `Error`, etc.) are read from the inverter input registers (FC04) by the same comms block and written into the UDT.
 
 This separation means:
 - The PPC logic is completely independent of register addresses
@@ -466,8 +474,8 @@ This separation means:
 
 | Step | Item | Status |
 |---|---|---|
-| 1 | UDT `Inverter_controller` — add `RemRdy_Spt: DInt` field | To verify |
-| 2 | DB39 `PPC_Controller` — add `WRtg_kW`, `Limits_QmaxPlant`, `Plant_VArMode`, `AnyFault` | To verify |
+| 1 | UDT `Inverter_controller` — add `ErrClr: DInt` field (maps to SMA Holding Reg 8) | To verify |
+| 2 | DB39 `PPC_Controller` — add `Q_RampUp: REAL`, `Q_RampDown: REAL`, `Ramps_Qcmd: REAL`, `AnyDerating: BOOL`, `FaultMask: WORD` | To verify |
 | 3 | Import and compile `FC_PPC_InverterMonitor` | To do |
 | 4 | Import and compile `FC_PPC_ModeManager` | To do |
 | 5 | Import and compile `FC_PPC_RampControl` | To do |
