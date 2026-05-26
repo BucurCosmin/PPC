@@ -1,0 +1,175 @@
+// =============================================================================
+// FC_PPC_SkidMapping  —  SKID Modbus ↔ Inverter_controller data mapping
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Bridges one SKID DB (Modbus TCP interface to one SMA Sunny Central) and its
+//   corresponding Inverter_controller UDT instance in PPC_Controller.
+//   One call per SKID per OB30 scan.
+//
+// DATA FLOW:
+//   READ  (Modbus → PPC)  SKID.Inverter / SKID.Params_Inputs  →  Inverter_controller
+//   WRITE (PPC → Modbus)  Inverter_controller  →  SKID.Inverter
+//
+// CALL ORDER IN OB30:
+//   Call all 10 instances of this FC BEFORE "FB_PPC_Controller" so that:
+//     • the PPC FB sees the latest SKID read data in this scan, and
+//     • the SKID DBs receive the setpoints written by PPC in the previous scan.
+//
+// EXAMPLE OB30 CALLS (10 inverters):
+//   "FC_PPC_SkidMapping"(Inverter:="PPC_Controller".Inverters.PPC_Inverters[0],
+//                        SkidInverter:="SKID1".Inverter,
+//                        SkidInputs:="SKID1".Params_Inputs, CommError:=SKID1_CommErr);
+//   "FC_PPC_SkidMapping"(Inverter:="PPC_Controller".Inverters.PPC_Inverters[1],
+//                        SkidInverter:="SKID2".Inverter,
+//                        SkidInputs:="SKID2".Params_Inputs, CommError:=SKID2_CommErr);
+//   ... (repeat through SKID10 / PPC_Inverters[9])
+//   "FB_PPC_Controller"(...);
+//
+// COMMRERROR SOURCE:
+//   Pass the Error or timeout output from the Modbus_Client FB that drives each
+//   SKID's TCP connection.  When TRUE the FC sets Inverter.CommError and skips
+//   writing setpoints to the SKID DB (comms are down so writes are pointless).
+//   Read fields are NOT cleared on CommError — the SKID DB retains the last
+//   valid values, which is more useful than zeroing everything.
+//
+// START / STOP INTERLOCK NOTE (SMA requirement):
+//   The SMA inverter requires GriMng.RemRdy to be written BEFORE InvOpMod in
+//   any start or stop sequence.  This FC writes RemRdy first, then InvOpMod, in
+//   source order.  Whether the Modbus_Client sends them as two separate FC16
+//   transactions (safest) or in a single multi-register FC16 depends on how the
+//   SKID's Modbus_Client FB is configured.  If using a single FC16, verify with
+//   SMA that the inverter processes the register frame atomically, or configure
+//   the Modbus_Client to write RemRdy (reg address from SMA map) as a separate
+//   single-register write before the combined setpoint write.
+//
+// WAval / VArAval SCALING NOTE:
+//   Sunny_inverter.WAval and .VArAval are declared as Real.  This FC assumes the
+//   SMA Modbus block delivers them as per-unit fractions (0.0 = 0 %, 1.0 = 100 %).
+//   Inverter_controller uses FIX4 DInt (×10000) to match the PPC distribution logic.
+//   If the Modbus block delivers percentage (0–100) instead of pu (0.0–1.0),
+//   change the multiplier below from 10000.0 to 100.0.
+//
+// CALLED FROM: OB30 (once per SKID per 100 ms scan)
+// =============================================================================
+
+FUNCTION "FC_PPC_SkidMapping" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERFACE
+// ─────────────────────────────────────────────────────────────────────────────
+VAR_IN_OUT
+    // PPC inverter data — both directions updated by this FC.
+    // Corresponds to one element of "PPC_Controller".Inverters.PPC_Inverters[i].
+    Inverter : "Inverter_controller";
+
+    // SKID holding-register mirror (Sunny_inverter UDT from SKIDx.Inverter).
+    // Read fields are populated by the Modbus_Client read transactions;
+    // write fields are consumed by the Modbus_Client write transactions.
+    SkidInverter : "Sunny_inverter";
+END_VAR
+
+VAR_INPUT
+    // SKID input-register data (SKIDx.Params_Inputs) — read-only measurements.
+    SkidInputs : "Skid_Parameters_Inputs";
+
+    // TRUE = Modbus TCP connection lost or Modbus_Client reported an error.
+    // Source: Error / timeout output of the Modbus_Client FB for this SKID.
+    CommError : BOOL;
+END_VAR
+
+VAR_TEMP
+    opStt : DINT;
+END_VAR
+
+
+BEGIN
+
+    // =========================================================================
+    // CommError passthrough
+    // =========================================================================
+    #Inverter.CommError := #CommError;
+
+
+    // =========================================================================
+    // READ direction: SKID (Modbus data) → Inverter_controller
+    // Runs regardless of CommError — SKID DB retains last valid values and
+    // those are more useful than stale zeros when comms are temporarily lost.
+    // =========================================================================
+
+    // ── RemReady — derived from OpStt ENUM ───────────────────────────────────
+    // 307 = Ok (standby, ready to operate)
+    // 308 = Operation (producing)
+    // 309 = Derating (producing at reduced power)
+    // All other values (303 Stop, 35 Error, etc.) → FALSE
+    #opStt := #SkidInverter.OpStt;
+    #Inverter.RemReady := (#opStt = 307) OR (#opStt = 308) OR (#opStt = 309);
+
+    // ── Error — derived from ErrStt ENUM ─────────────────────────────────────
+    // 307 = Ok (no fault).  Any other value = fault active.
+    #Inverter.Error := (#SkidInverter.ErrStt <> 307);
+
+    // ── Power measurements (FIX0 — DInt, physical units kW / kVAr) ───────────
+    #Inverter.Wactive := #SkidInverter."InvMs.TotW";
+    #Inverter.Qactive := #SkidInverter."InvMs.TotVAr";
+
+    // ── Available power fractions ─────────────────────────────────────────────
+    // Sunny_inverter delivers WAval / VArAval as Real per-unit (0.0 – 1.0).
+    // Inverter_controller stores them as FIX4 DInt (×10000) for the PPC FCs.
+    // Example: 0.85 pu × 10000 = 8500 DInt  →  85 % of rated power available.
+    #Inverter.WAval   := REAL_TO_DINT(#SkidInverter.WAval   * 10000.0);
+    #Inverter.VArAval := REAL_TO_DINT(#SkidInverter.VArAval * 10000.0);
+
+    // ── Disconnection reason ──────────────────────────────────────────────────
+    // 0 = no disconnection event.  Non-zero = reason code (e.g. 21626 = low setpoint).
+    // FaultHandler marks the inverter unavailable when PwrOffReas ≠ 0.
+    #Inverter.PwrOffReas := #SkidInverter.PwrOffReas;
+
+    // ── Derating state ────────────────────────────────────────────────────────
+    // 0 = no derating.  Non-zero = derating active (thermal, frequency, etc.).
+    // Sourced from Params_Inputs because DrtStt is an input register on this SKID.
+    #Inverter.DrtStt := #SkidInputs.DrtStt;
+
+
+    // =========================================================================
+    // WRITE direction: Inverter_controller → SKID (Modbus setpoints)
+    // Skip when comms are down — the Modbus_Client cannot send anyway, and
+    // writing to the DB would overwrite the last successfully sent values.
+    // =========================================================================
+    IF #CommError THEN
+        RETURN;
+    END_IF;
+
+    // ── Start / Stop interlock ────────────────────────────────────────────────
+    // SMA requires GriMng.RemRdy to be processed by the inverter BEFORE InvOpMod
+    // in any mode transition.  RemRdy is written first (source order) here;
+    // see the interlock note in the block header for Modbus transaction details.
+    //   308 = Operation (Remote permission granted / inverter running)
+    //   303 = Stop      (Remote permission removed / inverter stopping)
+    #SkidInverter.RemRdy   := #Inverter.OperMode;
+    #SkidInverter.InvOpMod := #Inverter.OperMode;
+
+    // ── Active power control ──────────────────────────────────────────────────
+    // WMode ENUM: 1079 = WCtlCom (external setpoint control), 303 = Off
+    #SkidInverter."GriMng.WMod" := #Inverter.WMode;
+    // WSpt: active power setpoint in kW (FIX0 — DInt, direct kW value)
+    #SkidInverter.WSpt          := #Inverter.WSpt;
+
+    // ── Reactive power / power factor control ─────────────────────────────────
+    // VArMode ENUM: 1072 = VArCtlCom (Q setpoint), 1075 = PFCtlCom (PF setpoint), 303 = Off
+    #SkidInverter."GriMng.VArMod" := #Inverter.VArMode;
+    // VArSpt: reactive power setpoint in kVAr (FIX0 — DInt, direct kVAr value)
+    #SkidInverter.VArSpt          := #Inverter.VArSpt;
+    // PFSpt: Inverter_controller = DInt FIX4 ×10000 (e.g. 9500 = PF 0.950)
+    //        Sunny_inverter       = Real cos(phi)    (e.g. 0.950)
+    #SkidInverter.PFSpt := DINT_TO_REAL(#Inverter.PFSpt) / 10000.0;
+
+    // ── Fault acknowledge — one-shot ──────────────────────────────────────────
+    // FaultHandler FC sets ErrClr = 26 for exactly one OB30 scan, then 0.
+    // This FC passes it straight through to the SKID ErrClr register.
+    // The Modbus_Client writes the value each scan; the inverter responds to the
+    // 0 → 26 rising edge.  Do NOT hold 26 for more than one scan.
+    #SkidInverter.ErrClr := #Inverter.ErrClr;
+
+END_FUNCTION
