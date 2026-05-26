@@ -1,0 +1,44 @@
+﻿DATA_BLOCK "PPC_Controller"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR 
+      Inverters { S7_SetPoint := 'False'} : "PPC_inverters";
+      Inverter1 { S7_SetPoint := 'False'} : "Inverter_controller";
+      Inverter2 : "Inverter_controller";
+      Inverter3 : "Inverter_controller";
+      Inverter4 : "Inverter_controller";
+      Inverter5 : "Inverter_controller";
+      Inverter6 : "Inverter_controller";
+      Inverter7 : "Inverter_controller";
+      Inverter8 : "Inverter_controller";
+      Inverter9 : "Inverter_controller";
+      Inverter10 : "Inverter_controller";
+      START_CONTROLLER { S7_SetPoint := 'True'} : Bool;
+      P_RampUp : Real;   // kWps
+      P_RampDown : Real;   // kWps
+      Q_RampUp : Real;   // kVArps 
+      Q_RampDown : Real;
+      PF_Ramp : Real;   // ps
+      Plant_P_meas : Real;   // kW
+      Plant_Q_meas : Real;   // kVAr
+      Plant_N_Online : Int;
+      Plant_Mode : Int;   // LOCAL / REMOTE_IEC / FALLBACK
+      Targets_P : Real;   // kW
+      Targets_Q : Real;   // kVAr
+      Targets_PF : Real;
+      Limits_PmaxPlant : Real;
+      Limits_QmaxPlant : Real;
+      Ramps_Pcmd : Real;
+      Ramps_Qcmd : Real;
+      WRtg_kW : Real;
+      AnyFault : Bool;
+      AnyDerating : Bool;
+      FaultMask : Word;
+   END_VAR
+
+
+BEGIN
+
+END_DATA_BLOCK
+

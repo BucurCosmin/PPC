@@ -1,0 +1,24 @@
+﻿TYPE "Inverter_controller"
+VERSION : 0.1
+   STRUCT
+      Enabled : Bool;
+      RemReady : Bool;
+      Error : Bool;
+      CommError : Bool;
+      OperMode : DInt;   // Operating state of the inverter, setpoint
+      Wactive : DInt;
+      Qactive : DInt;
+      WMode : DInt;   // Selection of procedure for setpoint for active power
+      VArMode : DInt;   // Selection of procedure for setpoint for reactive power
+      WSpt : DInt;   // Inverter active power setpoint.
+      VArSpt : DInt;   // Inverter reactive power setpoint (if Q control).
+      PFSpt : DInt;   // Inverter power factor setpoint (if PF control).
+      WAval : DInt;   // Available active power.
+      VArAval : DInt;   // Available reactive power.
+      PwrOffReas : DInt;   // Detect why inverter disconnected.
+      DrtStt : DInt;   // Derating state.
+      ErrClr : DInt;
+   END_STRUCT;
+
+END_TYPE
+
