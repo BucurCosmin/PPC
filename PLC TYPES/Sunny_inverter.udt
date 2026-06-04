@@ -1,0 +1,28 @@
+﻿TYPE "Sunny_inverter"
+VERSION : 0.1
+   STRUCT
+      InvOpMod : DInt;   // Operating state of the inverter, setpoint
+      RemRdy : DInt;   // Put inverter into operation or standby
+      "GriMng.VArMod" : DInt;   // Utility grid system services: Selection of procedure for setpoint for reactive power
+      "GriMng.WMod" : DInt;   // Utility grid system services: Selection of procedure for setpoint for active power
+      ErrClr : DInt;   // Acknowledgment of the present error
+      "ErrClr.ProErr" : DInt;   // Acknowledging of safety- relevant errors
+      "InvMs.TotVA" : DInt;   // Apparent power, total
+      "InvMs.TotW" : DInt;   // Active power, total
+      InstFunc : DInt;   // Activation of installation functions
+      "InvMs.TotVAr" : DInt;   // Reactive power, total
+      "GriMs.Hz" : Real;   // Grid frequency
+      ErrLcn : DInt;   // Error location of the present error
+      ErrStt : DInt;   // Error status of the inverter
+      ErrNo : DInt;   // Error number of the present error
+      OpStt : DInt;   // Operating state of the inverter
+      WSpt : DInt;   // Active power, setpoint
+      VArSpt : DInt;   // Reactive power, setpoint
+      PFSpt : Real;   // Power factor cos (phi), setpoint
+      WAval : Real;   // Currently available active power
+      VArAval : Real;   // Currently available reactive power
+      PwrOffReas : DInt;   // Current cause of inverter disconnection
+   END_STRUCT;
+
+END_TYPE
+

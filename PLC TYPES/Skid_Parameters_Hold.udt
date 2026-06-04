@@ -1,0 +1,36 @@
+﻿TYPE "Skid_Parameters_Hold"
+VERSION : 0.1
+   STRUCT
+      VADrtPriMod : DInt;   // Prioritizing of control of derating
+      WGraMod : DInt;   // Activates the active power gradient
+      WGra : Real;   // Active power gradient
+      VArGraMod : DInt;   // Activates the reactive power gradient
+      VArGra : Real;   // Reactive power gradient
+      "GriMng.InvVArMod" : DInt;   // Grid management services: specification of reactive power setpoint by the inverter
+      "PvGnd.OpnRemGfdi" : DInt;   // Open the Remote GFDI
+      StbySfCapacMod : DInt;   // Activation of standby mode of the sine-wave filter capacitor
+      WGraStr : Real;   // frequency: lower switch-on limit Start-up ramp for active power
+      "VArCtlVol.LoVolRef3" : Real;   // AC voltage-dependent reactive power control: reference point 3 (below reference point 1)
+      "VArCtlVol.LoVolRef2" : Real;   // AC voltage-dependent reactive power control: reference point 2 (below reference point 1)
+      "VArCtlVol.HiVolRef2" : Real;   // VArCtlVol.LoVolRef1 AC voltage-dependent reactive 75 6048 S16 1000 0 FIX3 pu HiVolRef1* power control: reference point 1 AC voltage-dependent reactive power control: reference point 2 (via reference point 1)
+      "VArCtlVol.HiVolRef3" : Real;   // AC voltage-dependent reactive power control: reference point 3 (via reference point 1)
+      "VArCtlVol.LoGra3" : Real;   // AC voltage-dependent reactive power control: gradient 3 (from reference point 3)
+      "VArCtlVol.LoGra2" : Real;   // AC voltage-dependent reactive power control: gradient 2 (from reference point 2)
+      "VArCtlVol.LoGra1" : Real;   // AC voltage-dependent reactive power control: gradient 1 (from reference point 1)
+      "VArCtlVol.HiGra1" : Real;   // AC voltage-dependent reactive power control: gradient 1 (from reference point 1)
+      "VArCtlVol.HiGra2" : Real;   // AC voltage-dependent reactive power control: gradient 2 (from reference point 2)
+      "VArCtlVol.HiGra3" : Real;   // AC voltage-dependent reactive power control: gradient 3 (from reference point 3)
+      WCtlHzMod : DInt;   // Activation of frequency- dependent active power control
+      "WCtlHz.W2" : Real;   // Frequency-dependent active U16 100 0 FIX2 Hz 86 WCtlHz.Hz1 power control: cutoff frequency 364 of the 1st radio spectrum Frequency-dependent active U16 100 0 FIX2 Hz 87 WCtlHz.Hz2 power control: cutoff frequency 365 of the 2st radio spectrum Frequency-dependent active U16 100 0 FIX2 Hz 88 WCtlHz.Hz3 power control: cutoff frequency 366 of the 2nd radio spectrum Frequency-dependent active U16 100 0 FIX2 Hz 89 WCtlHz.Hz4 power control: cutoff frequency 708 of the 4th radio spectrum Frequency-dependent active power control: power referring to the inverter at the beginning of the second area
+      "WCtlHz.W3" : Real;   // Frequency-dependent active power control: power referring to the inverter at the beginning of the third area
+      "WCtlVol.Ena" : DInt;   // Activation of AC voltage- dependent active power control
+      "WCtlVol.Vol1" : Real;   // AC voltage-dependent active power control: voltage at reference point 1
+      "WCtlVol.Vol3" : Real;   // AC voltage-dependent active power control: voltage at reference point 3
+      "WCtlVol.W1" : Real;   // AC voltage-dependent active power control: active power at reference point 1
+      "WCtlVol.W2" : Real;   // AC voltage-dependent active power control: active power at reference point 2
+      "WCtlVol.W3" : Real;   // AC voltage-dependent active power control: active power at reference point 3
+      "WCtlVol.W4" : Real;   // AC voltage-dependent active power control: active power at reference point 4
+   END_STRUCT;
+
+END_TYPE
+

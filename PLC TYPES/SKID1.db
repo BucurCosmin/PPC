@@ -1,0 +1,24 @@
+﻿DATA_BLOCK "SKID1"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   STRUCT 
+      Inverter { S7_SetPoint := 'False'} : "Sunny_inverter";
+      Params_Hold : "Skid_Parameters_Hold";
+      Params_Inputs : "Skid_Parameters_Inputs";
+      ConnectSettings {InstructionName := 'TCON_IP_v4'; LibVersion := '1.0'} : TCON_IP_v4;
+   END_STRUCT;
+
+
+BEGIN
+   ConnectSettings.InterfaceId := 64;
+   ConnectSettings.ID := 1;
+   ConnectSettings.ConnectionType := 11;
+   ConnectSettings.ActiveEstablished := true;
+   ConnectSettings.RemoteAddress.ADDR[1] := 192;
+   ConnectSettings.RemoteAddress.ADDR[2] := 168;
+   ConnectSettings.RemoteAddress.ADDR[3] := 10;
+   ConnectSettings.RemoteAddress.ADDR[4] := 101;
+   ConnectSettings.RemotePort := 502;
+
+END_DATA_BLOCK
+

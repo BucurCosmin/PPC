@@ -1,0 +1,80 @@
+FUNCTION "FC_Pack_Write_Regs" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+// Packs Inverter UDT setpoint values into holdingRegisterMod[] before each MB_CLIENT write state.
+// Call on the single scan when FSM_DB.Transition = TRUE for write states 4, 5, 6.
+// All three call sites are identical except WriteStep — pass the full Inv UDT every time.
+//
+// WriteStep 1 -> regs  0-9  : InvOpMod, RemRdy, VArMod, WMod, ErrClr  (FC16 addr 0,   len 10)
+// WriteStep 2 -> regs  0-1  : WSpt                                      (FC16 addr 108, len  2)
+// WriteStep 3 -> regs  0-3  : VArSpt, PFSpt                             (FC16 addr 112, len  4)
+//
+// All SMA registers are S32 big-endian (high word at lower address).
+// PFSpt is Real in the UDT; SMA expects FIX4 (*10000) as S32.
+// ErrClr is one-shot: caller must zero Inverter.ErrClr after Write1_Done pulses.
+
+   VAR_INPUT
+      WriteStep : USInt;          // 1, 2 or 3 — selects which register group to pack
+      Inv       : "Sunny_inverter";  // full inverter UDT — only relevant fields used per step
+   END_VAR
+
+   VAR_IN_OUT
+      RegBuf : Array[0..200] of Word;   // = FB15.holdingRegisterMod (MB_DATA_PTR target)
+   END_VAR
+
+   VAR_TEMP
+      PFSpt_DInt : DInt;
+   END_VAR
+
+BEGIN
+
+   CASE #WriteStep OF
+
+      1:
+         // Write group 1 — FC16 starting address 0, length 10 words
+         // Each S32 splits into [high word, low word] at consecutive buffer indices.
+
+         // reg 0-1 : InvOpMod (308=Operation / 303=Stop)
+         #RegBuf[0] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv.InvOpMod), N := 16));
+         #RegBuf[1] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv.InvOpMod));
+
+         // reg 2-3 : RemRdy (308=Ready / 303=Standby)
+         #RegBuf[2] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv.RemRdy), N := 16));
+         #RegBuf[3] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv.RemRdy));
+
+         // reg 4-5 : GriMng.VArMod
+         #RegBuf[4] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv."GriMng.VArMod"), N := 16));
+         #RegBuf[5] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv."GriMng.VArMod"));
+
+         // reg 6-7 : GriMng.WMod (1079=WCtlCom / 303=Off)
+         #RegBuf[6] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv."GriMng.WMod"), N := 16));
+         #RegBuf[7] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv."GriMng.WMod"));
+
+         // reg 8-9 : ErrClr (one-shot — caller zeros this field after Write1_Done)
+         #RegBuf[8] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv.ErrClr), N := 16));
+         #RegBuf[9] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv.ErrClr));
+
+      2:
+         // Write group 2 — FC16 starting address 108, length 2 words
+         // Regs 110-111 are NOT part of this write (gap before VArSpt at 112).
+
+         // reg 108-109 : WSpt [kW] FIX0 — already integer, no scaling
+         #RegBuf[0] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv.WSpt), N := 16));
+         #RegBuf[1] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv.WSpt));
+
+      3:
+         // Write group 3 — FC16 starting address 112, length 4 words
+
+         // reg 112-113 : VArSpt [kVAr] FIX0 — already integer, no scaling
+         #RegBuf[0] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#Inv.VArSpt), N := 16));
+         #RegBuf[1] := DWORD_TO_WORD(DINT_TO_DWORD(#Inv.VArSpt));
+
+         // reg 114-115 : PFSpt FIX4 — Real 0.95 -> DInt 9500 -> two words
+         #PFSpt_DInt := REAL_TO_DINT(#Inv.PFSpt * 10000.0);
+         #RegBuf[2] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#PFSpt_DInt), N := 16));
+         #RegBuf[3] := DWORD_TO_WORD(DINT_TO_DWORD(#PFSpt_DInt));
+
+   END_CASE;
+
+END_FUNCTION
