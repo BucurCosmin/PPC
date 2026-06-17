@@ -22,9 +22,10 @@ OB30 TICK (every 100 ms)
 │
 ├─► [C] INTERLOCK CHECK
 │       ↓
-│       ├─ IEC_Watchdog = FALSE? → Hold setpoints, safe mode
-│       ├─ CommError = TRUE?     → Skip all writes
-│       ├─ Enabled = FALSE?      → Skip all writes
+│       ├─ IEC_Watchdog = FALSE?        → Hold setpoints, safe mode
+│       ├─ CommError = TRUE?            → Skip all writes
+│       ├─ Enabled = FALSE?             → Skip all writes
+│       ├─ SKID_ELECTRIC.ELECTRIC_OK = FALSE? → Exclude from N_online, skip writes
 │       └─ Pass all → [D] WRITE PHASE
 │
 └─► [D] WRITE PHASE — FB15 FSM States 4/5/6 (FC16)
@@ -65,6 +66,8 @@ flowchart TD
         IL0{IEC_Watchdog\n= FALSE?}
         IL_WD([Hold setpoints\nSafe mode - no new commands])
         IL1{CommError?}
+        ILE{SKID_ELECTRIC\nELECTRIC_OK = FALSE?}
+        IL_ELEC([Exclude from N_online\nBlock writes this skid])
         IL2{OperMode changed?}
         IL3{ErrClr ≠ 0?}
         IL4{Enabled = TRUE?}
@@ -98,7 +101,9 @@ flowchart TD
     IL0 -- Yes --> IL_WD --> W_DONE
     IL0 -- No --> IL1
     IL1 -- Yes --> IL_BLOCK
-    IL1 -- No --> IL4
+    IL1 -- No --> ILE
+    ILE -- Yes --> IL_ELEC --> W_DONE
+    ILE -- No --> IL4
     IL4 -- No --> IL_BLOCK
     IL4 -- Yes --> IL2
     IL2 -- Yes, 303 --> W_PACK4
@@ -241,6 +246,7 @@ RECOVERY:
 |---|---|---|
 | `IEC_Watchdog = FALSE` | Hold last setpoints, no new commands to PPC | FB_PPC_Controller input — wire from upstream SCADA/IEC104 status |
 | `CommError = TRUE` | Block ALL writes to this inverter | Internal UDT flag |
+| `SKID_ELECTRIC.SkidN.ELECTRIC_OK = FALSE` | Exclude skid from N_online, block ALL writes to this skid | `SKID_ELECTRIC` DB — switchgear breaker/separator/earthing status |
 | `Enabled = FALSE` | Block ALL writes to this inverter | DB39.Skid[i].Enabled |
 | `ErrStt = Error (1392)` | Block setpoint writes (WSpt/VArSpt/PFSpt) | Input reg 94 |
 | `OperMode = 308` | Write RemRdy=308 **before** InvOpMod=308 | Holding regs 2, 0 |
@@ -343,4 +349,69 @@ FSM state sequence per OB30 cycle (one inverter):
 
 ---
 
-*Document version: updated 2026-06-04 | Additions: IEC_Watchdog interlock, FB15 6-state FSM write sequence, FC17 race condition fix, ErrClr one-shot implementation | Source: MODBUS-SCxxxx-TI-en-19 + SCADA Register Map XLSX*
+## 12. SKID_ELECTRIC — Switchgear Availability Interlock
+
+Each skid has 3 switchgear cells whose breaker/separator/earthing position determines whether the skid is physically able to deliver power to the network, independent of inverter Modbus status. This is a **hardwired digital input** interlock, not a Modbus signal — it must pass before a skid is counted in `N_online` or sent any setpoint.
+
+### 12.1 Cell layout per skid
+
+| Cell | Signals | Condition for "OK" |
+|---|---|---|
+| Output cell 1 | `Sep_Cel1`, `Clp_Cel1` | Separator closed AND earthing switch open |
+| Output cell 2 | `Sep_Cel2`, `Clp_Cel2` | Separator closed AND earthing switch open |
+| Transformer cell | `Intrerup_CelTraf`, `Sep_CelTraf`, `Clp_CelTraf` | Breaker closed AND separator closed AND earthing switch open |
+
+> **Polarity assumption:** all raw inputs assumed wired to "closed position" contacts — `TRUE` = separator/breaker closed, `TRUE` = earthing switch closed (earthed). **Verify against actual switchgear auxiliary contact wiring before commissioning.** If contacts report "open" instead, invert in the DI-to-DB copy network.
+
+### 12.2 Implementation — `FC_SkidElectricStatus` + `Skid_Electric_Status` UDT + `SKID_ELECTRIC` DB
+
+```pascal
+// FC_SkidElectricStatus — called once per skid (10×) every cycle, BEFORE FB_PPC_Controller
+#Skid.Cel1_OK    := #Skid.Sep_Cel1 AND NOT #Skid.Clp_Cel1;
+#Skid.Cel2_OK    := #Skid.Sep_Cel2 AND NOT #Skid.Clp_Cel2;
+#Skid.CelTraf_OK := #Skid.Intrerup_CelTraf AND #Skid.Sep_CelTraf AND NOT #Skid.Clp_CelTraf;
+#Skid.ELECTRIC_OK := #Skid.Cel1_OK AND #Skid.Cel2_OK AND #Skid.CelTraf_OK;
+```
+
+`SKID_ELECTRIC` DB layout: **`Skids : Array[0..9] of "Skid_Electric_Status"`** — array form, matching the existing `Inverters : Array[0..9] of "Inverter_controller"` convention used throughout the PPC FCs (not named `Skid1`…`Skid10` members). Each element holds the 7 raw DI fields, 3 per-cell `_OK` diagnostics, and the combined `ELECTRIC_OK`.
+
+OB30 call order:
+```
+10x "FC_SkidElectricStatus"(Skid := "SKID_ELECTRIC".Skids[i]);   // i = 0..9, hardwired DI
+10x "FC_PPC_SkidMapping"(...);                                    // Modbus bridge, existing
+   "FB_PPC_Controller"(...);                                      // reads SKID_ELECTRIC.Skids
+```
+
+### 12.3 PPC dispatch integration — single source of truth in InverterMonitor
+
+`ELECTRIC_OK` is **not** a standalone gate bolted onto `Inverter.Enabled`. It is folded in as the 6th condition of the existing online-criteria check, computed **once** in `FC_PPC_InverterMonitor` (step ① — runs first in the FB_PPC_Controller chain) and cached into `Inverters[i].Available`. This replaced three separate copies of a 5-condition check that previously existed in `FC_PPC_InverterMonitor`, `FC_PPC_PowerDistribution`, and `FC_PPC_ReactiveControl`.
+
+```pascal
+// FC_PPC_InverterMonitor — step ①, the only place this is computed
+#Inverters[#i].Available :=
+       #Inverters[#i].Enabled
+   AND #Inverters[#i].RemReady
+   AND NOT #Inverters[#i].Error
+   AND NOT #Inverters[#i].CommError
+   AND (#Inverters[#i].PwrOffReas = 0)
+   AND #SkidElectric[#i].ELECTRIC_OK;        // ← new condition
+
+IF #Inverters[#i].Available THEN
+    #N_Online := #N_Online + 1;
+    // ... PmaxPlant / QmaxPlant accumulation unchanged
+END_IF;
+```
+
+| Consumer | How it uses `ELECTRIC_OK` |
+|---|---|
+| `FC_PPC_InverterMonitor` | Computes it, writes `Inverters[i].Available` (step ①) |
+| `FC_PPC_PowerDistribution` | Reads `Inverters[i].Available` directly — no re-derivation (step ④) |
+| `FC_PPC_ReactiveControl` | Reads `Inverters[i].Available` directly — no re-derivation (step ⑤) |
+| `FC_PPC_FaultHandler` | Treats `NOT ELECTRIC_OK` the same as `PwrOffReas ≠ 0`: zeroes WSpt/VArSpt/PFSpt, sets `AnyFault`, but keeps `OperMode=308` for instant recovery once switchgear is restored (step ⑥) |
+| `FB_PPC_Controller` | Passes `"SKID_ELECTRIC".Skids` into both `FC_PPC_InverterMonitor` and both `FC_PPC_FaultHandler` calls (normal path and the `EN_PPC=FALSE` guard path) |
+
+`Inverter.Enabled` is never written by this logic — it remains exclusively operator/HMI-controlled (see Modbus_Comms_Mapping.md §5). `Available` is the dispatch gate; `Enabled` is the manual override input to that gate, not a target the automatic logic overwrites.
+
+---
+
+*Document version: updated 2026-06-06 | Additions: SKID_ELECTRIC switchgear availability interlock folded into FC_PPC_InverterMonitor.Available (single source of truth across PowerDistribution/ReactiveControl/FaultHandler), IEC_Watchdog interlock, FB15 6-state FSM write sequence, FC17 race condition fix, ErrClr one-shot implementation | Source: MODBUS-SCxxxx-TI-en-19 + SCADA Register Map XLSX*

@@ -1,0 +1,25 @@
+TYPE "Skid_Electric_Status"
+VERSION : 0.1
+   STRUCT
+      // ── Raw digital inputs — map from physical %I addresses in OB30, see FC_SkidElectricStatus call site ──
+      // Convention assumed: TRUE = closed position contact (separator/breaker closed, earthing switch closed/earthed).
+      // VERIFY against actual switchgear auxiliary contact wiring before commissioning — invert in the copy
+      // network below if your contacts report "open" instead.
+      Sep_Cel1         : Bool;   // Separator, output cell 1 — TRUE = closed
+      Clp_Cel1         : Bool;   // Earthing switch, output cell 1 — TRUE = closed (earthed)
+      Sep_Cel2         : Bool;   // Separator, output cell 2 — TRUE = closed
+      Clp_Cel2         : Bool;   // Earthing switch, output cell 2 — TRUE = closed (earthed)
+      Intrerup_CelTraf : Bool;   // Breaker, transformer cell — TRUE = closed
+      Sep_CelTraf      : Bool;   // Separator, transformer cell — TRUE = closed
+      Clp_CelTraf      : Bool;   // Earthing switch, transformer cell — TRUE = closed (earthed)
+
+      // ── Computed per-cell status (written by FC_SkidElectricStatus) ──
+      Cel1_OK          : Bool;   // Sep_Cel1 AND NOT Clp_Cel1
+      Cel2_OK          : Bool;   // Sep_Cel2 AND NOT Clp_Cel2
+      CelTraf_OK       : Bool;   // Intrerup_CelTraf AND Sep_CelTraf AND NOT Clp_CelTraf
+
+      // ── Combined result — consumed by PPC dispatch logic ──
+      ELECTRIC_OK      : Bool;   // Cel1_OK AND Cel2_OK AND CelTraf_OK — skid available for power delivery
+   END_STRUCT;
+
+END_TYPE

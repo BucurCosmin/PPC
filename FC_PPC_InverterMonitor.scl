@@ -11,12 +11,16 @@
 //   This FC must be called FIRST in the FB execution chain because all
 //   downstream FCs depend on N_Online, PmaxPlant and QmaxPlant.
 //
-// ONLINE CRITERIA (all five must be TRUE):
+// ONLINE CRITERIA (all six must be TRUE) — computed ONCE here and cached into
+// Inverters[i].Available. PowerDistribution and ReactiveControl read .Available
+// instead of re-deriving this list, so there is a single source of truth.
 //   Enabled          — operator has enabled this inverter in the PPC
 //   RemReady         — inverter feedback reports remote-ready (read from OpStt)
 //   NOT Error        — no active inverter fault (ErrStt = Ok)
 //   NOT CommError    — Modbus communication is healthy (set by comms block)
 //   PwrOffReas = 0   — inverter did not disconnect abnormally
+//   ELECTRIC_OK      — switchgear breaker/separator/earthing status OK
+//                       (SKID_ELECTRIC DB, written by FC_SkidElectricStatus)
 //
 // SCALING:
 //   WAval and VArAval are stored as DInt in pu × 10000 format (SMA FIX4).
@@ -43,6 +47,10 @@ VAR_IN_OUT
     // The 10-element inverter array from DB39 (PPC_Controller.PPC_Inverters).
     // Passed IN_OUT so the FC reads directly from the live DB without copying.
     Inverters : Array[0..9] of "Inverter_controller";
+
+    // Switchgear electric status per skid (SKID_ELECTRIC DB). Written by
+    // FC_SkidElectricStatus, called 10x in OB30 before this FC.
+    SkidElectric : Array[0..9] of "Skid_Electric_Status";
 END_VAR
 
 VAR_OUTPUT
@@ -68,12 +76,15 @@ BEGIN
     // ── Scan every inverter slot ──────────────────────────────────────────────
     FOR #i := 0 TO 9 DO
 
-        IF  #Inverters[#i].Enabled              // Operator enable in PPC config
-        AND #Inverters[#i].RemReady             // Inverter reports remote-ready
-        AND NOT #Inverters[#i].Error            // No active inverter fault
-        AND NOT #Inverters[#i].CommError        // Modbus link is healthy
-        AND (#Inverters[#i].PwrOffReas = 0)     // No abnormal disconnection reason
-        THEN
+        #Inverters[#i].Available :=
+               #Inverters[#i].Enabled              // Operator enable in PPC config
+           AND #Inverters[#i].RemReady             // Inverter reports remote-ready
+           AND NOT #Inverters[#i].Error            // No active inverter fault
+           AND NOT #Inverters[#i].CommError        // Modbus link is healthy
+           AND (#Inverters[#i].PwrOffReas = 0)     // No abnormal disconnection reason
+           AND #SkidElectric[#i].ELECTRIC_OK;      // Switchgear breaker/sep/earth OK
+
+        IF #Inverters[#i].Available THEN
             #N_Online := #N_Online + 1;
 
             // WAval: available active power, SMA FIX4 format, unit = pu

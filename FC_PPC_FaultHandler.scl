@@ -33,10 +33,12 @@
 //      → M6 fix: also send ErrClr=26 when Enabled transitions FALSE→TRUE,
 //        in case the one-shot fired while the inverter was disabled and the
 //        comms block suppressed the write. PrevEnabled tracks Enabled edges.
-//      → PwrOffReas ≠ 0: inverter disconnected abnormally — zero setpoints
-//        and set AnyFault, but keep OperMode=308 to allow recovery.
-//        PowerDistribution and ReactiveControl already exclude this inverter
-//        from distribution; zeroing here is belt-and-suspenders.
+//      → PwrOffReas ≠ 0 OR ELECTRIC_OK = FALSE: inverter disconnected abnormally
+//        or switchgear (breaker/separator/earthing) not in deliverable state —
+//        zero setpoints and set AnyFault, but keep OperMode=308 to allow instant
+//        recovery once the condition clears. PowerDistribution and ReactiveControl
+//        already exclude this inverter from distribution via Available; zeroing
+//        here is belt-and-suspenders.
 //      → DrtStt ≠ 0: inverter is derated (thermal, grid frequency, etc.).
 //        Set AnyDerating for HMI alarm. Power is still distributed; WAval
 //        already reflects the reduced capacity so the proportional share is
@@ -69,6 +71,10 @@ END_VAR
 VAR_IN_OUT
     // 10-element inverter array. OperMode, ErrClr and setpoints are written.
     Inverters : Array[0..9] of "Inverter_controller";
+
+    // Switchgear electric status per skid (SKID_ELECTRIC DB). Same array passed
+    // to FC_PPC_InverterMonitor — read-only here.
+    SkidElectric : Array[0..9] of "Skid_Electric_Status";
 
     // Reset to 0.0 when all inverters are offline (clean ramp restart).
     Ramps_Pcmd : REAL;
@@ -191,12 +197,15 @@ BEGIN
                 #AnyDerating := TRUE;
             END_IF;
 
-            // PwrOffReas supervision: non-zero means inverter disconnected for
-            // an abnormal reason (e.g. code 21626 = "Low Power SetPoint").
+            // PwrOffReas / ELECTRIC_OK supervision:
+            //   PwrOffReas ≠ 0   — inverter disconnected for an abnormal reason
+            //                      (e.g. code 21626 = "Low Power SetPoint")
+            //   NOT ELECTRIC_OK  — switchgear breaker/separator/earthing not in
+            //                      a deliverable state for this skid
             // Treat as unavailable: zero setpoints and flag fault.
             // PowerDistribution/ReactiveControl already excluded this inverter
-            // from their online check; zeroing here is belt-and-suspenders.
-            IF #Inverters[#i].PwrOffReas <> 0 THEN
+            // via Available; zeroing here is belt-and-suspenders.
+            IF (#Inverters[#i].PwrOffReas <> 0) OR NOT #SkidElectric[#i].ELECTRIC_OK THEN
                 #Inverters[#i].WSpt   := 0;
                 #Inverters[#i].VArSpt := 0;
                 #Inverters[#i].PFSpt  := 0;

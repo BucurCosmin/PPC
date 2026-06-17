@@ -1,0 +1,29 @@
+FUNCTION "FC_SkidElectricStatus" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+// Computes switchgear availability for one skid from its 3 cells:
+//   - cel_traf (transformer cell): breaker closed AND separator closed AND earthing open
+//   - cel_1, cel_2 (output cells): separator closed AND earthing open
+// ELECTRIC_OK = TRUE only if all three cells are in a state that allows power delivery.
+// Call once per skid (10 times) every cycle — see call site pattern below.
+
+   VAR_IN_OUT
+      Skid : "Skid_Electric_Status";
+   END_VAR
+
+BEGIN
+
+   // Output cell 1: separator closed, earthing switch open (not earthed)
+   #Skid.Cel1_OK := #Skid.Sep_Cel1 AND NOT #Skid.Clp_Cel1;
+
+   // Output cell 2: separator closed, earthing switch open (not earthed)
+   #Skid.Cel2_OK := #Skid.Sep_Cel2 AND NOT #Skid.Clp_Cel2;
+
+   // Transformer cell: breaker closed, separator closed, earthing switch open (not earthed)
+   #Skid.CelTraf_OK := #Skid.Intrerup_CelTraf AND #Skid.Sep_CelTraf AND NOT #Skid.Clp_CelTraf;
+
+   // Skid is available for power delivery only if all three cells are OK
+   #Skid.ELECTRIC_OK := #Skid.Cel1_OK AND #Skid.Cel2_OK AND #Skid.CelTraf_OK;
+
+END_FUNCTION

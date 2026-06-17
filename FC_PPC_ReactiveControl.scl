@@ -39,8 +39,8 @@
 //   Example: PF 0.950 lagging → write 9500; PF 1.000 → write 10000.
 //
 // ONLINE CRITERIA:
-//   Enabled, RemReady, NOT Error, NOT CommError, PwrOffReas = 0.
-//   Matches InverterMonitor and PowerDistribution exactly.
+//   Read from Inverters[i].Available — computed once in FC_PPC_InverterMonitor.
+//   Not re-derived here — single source of truth avoids drift between FCs.
 //
 // CALLED FROM: FB_PPC_Controller (step ⑤)
 // =============================================================================
@@ -92,7 +92,6 @@ VAR_TEMP
     i               : INT;    // Loop index
     sumVArAval_raw  : DINT;   // Sum of raw VArAval (pu×10000) for online inverters
     share           : REAL;   // This inverter's fraction of total reactive capacity
-    onlineAndOk     : BOOL;   // Reusable online-check flag
     effectiveTarget : REAL;   // Q target after FALLBACK override
     delta           : REAL;   // Error between target and current ramped output
     maxStep         : REAL;   // Maximum kVAr change allowed this scan
@@ -145,12 +144,7 @@ BEGIN
     // ── Pre-compute VArAval sum for proportional Q mode (mode 1) ─────────────
     #sumVArAval_raw := 0;
     FOR #i := 0 TO 9 DO
-        IF  #Inverters[#i].Enabled
-        AND #Inverters[#i].RemReady
-        AND NOT #Inverters[#i].Error
-        AND NOT #Inverters[#i].CommError
-        AND (#Inverters[#i].PwrOffReas = 0)
-        THEN
+        IF #Inverters[#i].Available THEN
             #sumVArAval_raw := #sumVArAval_raw + #Inverters[#i].VArAval;
         END_IF;
     END_FOR;
@@ -158,13 +152,7 @@ BEGIN
     // ── Write reactive setpoints to each inverter ─────────────────────────────
     FOR #i := 0 TO 9 DO
 
-        #onlineAndOk := #Inverters[#i].Enabled
-                        AND #Inverters[#i].RemReady
-                        AND NOT #Inverters[#i].Error
-                        AND NOT #Inverters[#i].CommError
-                        AND (#Inverters[#i].PwrOffReas = 0);
-
-        IF #onlineAndOk THEN
+        IF #Inverters[#i].Available THEN
 
             CASE #Plant_VArMode OF
 

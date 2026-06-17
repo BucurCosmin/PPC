@@ -6,12 +6,16 @@
 //   default 100 ms). Calls six FCs in a fixed order; each FC feeds the next.
 //
 // CALL ORDER AND DATA FLOW:
-//   ①  FC_PPC_InverterMonitor    →  N_Online, PmaxPlant, QmaxPlant
+//   ①  FC_PPC_InverterMonitor    →  N_Online, PmaxPlant, QmaxPlant, Inverters[i].Available
 //   ②  FC_PPC_ModeManager        →  Plant_Mode  (LOCAL / REMOTE_IEC / FALLBACK)
 //   ③  FC_PPC_RampControl        →  Ramps_Pcmd  (rate-limited P command in kW)
 //   ④  FC_PPC_PowerDistribution  →  WSpt, WMode per inverter
 //   ⑤  FC_PPC_ReactiveControl    →  Ramps_Qcmd, VArSpt / PFSpt / VArMode per inverter
 //   ⑥  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
+//
+// PRECONDITION — caller (OB30) must run BEFORE this FB, once per skid (10x):
+//   "FC_SkidElectricStatus"(Skid := "SKID_ELECTRIC".Skids[i]);
+//   so that SKID_ELECTRIC.Skids[i].ELECTRIC_OK is fresh when step ① reads it.
 //
 // DB39 FIELDS REQUIRED (user must add if not present):
 //   Q_RampUp     : REAL    — Q ramp rate up in kVAr/s
@@ -130,9 +134,10 @@ BEGIN
     // =========================================================================
     IF NOT #EN_PPC THEN
         "FC_PPC_FaultHandler"(
-            Plant_Mode  := #Plant_Mode,
-            ForceStop   := TRUE,
-            Inverters   := "PPC_Controller".Inverters.PPC_Inverters,
+            Plant_Mode   := #Plant_Mode,
+            ForceStop    := TRUE,
+            Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
+            SkidElectric := "SKID_ELECTRIC".Skids,
             Ramps_Pcmd  := #Ramps_Pcmd,
             Ramps_Qcmd  := #Ramps_Qcmd,
             PrevError   := #PrevError_Arr,
@@ -179,11 +184,12 @@ BEGIN
     // ①  FC_PPC_InverterMonitor
     // =========================================================================
     "FC_PPC_InverterMonitor"(
-        WRtg_kW   := "PPC_Controller".WRtg_kW,
-        Inverters  := "PPC_Controller".Inverters.PPC_Inverters,
-        N_Online   => #N_Online,
-        PmaxPlant  => #PmaxPlant,
-        QmaxPlant  => #QmaxPlant
+        WRtg_kW      := "PPC_Controller".WRtg_kW,
+        Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
+        SkidElectric := "SKID_ELECTRIC".Skids,
+        N_Online     => #N_Online,
+        PmaxPlant    => #PmaxPlant,
+        QmaxPlant    => #QmaxPlant
     );
     "PPC_Controller".Plant_N_Online   := #N_Online;
     "PPC_Controller".Limits_PmaxPlant := #PmaxPlant;
@@ -258,9 +264,10 @@ BEGIN
     // ⑥  FC_PPC_FaultHandler  (always last)
     // =========================================================================
     "FC_PPC_FaultHandler"(
-        Plant_Mode  := #Plant_Mode,
-        ForceStop   := FALSE,
-        Inverters   := "PPC_Controller".Inverters.PPC_Inverters,
+        Plant_Mode   := #Plant_Mode,
+        ForceStop    := FALSE,
+        Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
+        SkidElectric := "SKID_ELECTRIC".Skids,
         Ramps_Pcmd  := #Ramps_Pcmd,
         Ramps_Qcmd  := #Ramps_Qcmd,
         PrevError   := #PrevError_Arr,

@@ -1,10 +1,13 @@
 ﻿TYPE "Inverter_controller"
 VERSION : 0.1
    STRUCT
-      Enabled : Bool;
+      Enabled : Bool;   // Operator/HMI enable - manual, never overwritten by automatic logic
       RemReady : Bool;
       Error : Bool;
       CommError : Bool;
+      Available : Bool;   // Combined online criteria, written ONCE by FC_PPC_InverterMonitor (step 1):
+                           // Enabled AND RemReady AND NOT Error AND NOT CommError AND PwrOffReas=0 AND ELECTRIC_OK.
+                           // PowerDistribution / ReactiveControl read this instead of re-deriving the criteria.
       OperMode : DInt;   // Operating state of the inverter, setpoint
       Wactive : DInt;
       Qactive : DInt;
