@@ -19,8 +19,9 @@
 //   ⑧  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
 //
 // PRECONDITION — caller (OB30) must run BEFORE this FB, once per skid (10x):
-//   "FC_SkidElectricStatus"(Skid := "SKID_ELECTRIC".Skids[i]);
-//   so that SKID_ELECTRIC.Skids[i].ELECTRIC_OK is fresh when step ① reads it.
+//   "FC_SkidElectricStatus"(Skid := "PPC_Controller".Skids[i]);
+//   Skids lives in the PPC_Controller instance DB (static section below) —
+//   no separate SKID_ELECTRIC global DB is required.
 //
 // FREQUENCY DROOP ARCHITECTURE (Art. 114–120, ANRE Ord 51/2019):
 //   Droop correction is added AFTER the P ramp (step ③→④) so frequency events
@@ -171,6 +172,11 @@ VAR
     // Previous Enabled state per inverter — for ErrClr re-send on re-enable (M6).
     PrevEnabled_Arr : Array[0..9] of BOOL;
 
+    // Switchgear electric status — written by FC_SkidElectricStatus calls in OB30.
+    // OB30 call: "FC_SkidElectricStatus"(Skid := "PPC_Controller".Skids[i]);
+    // Lives here so no separate global DB is needed.
+    Skids : Array[0..9] of "Skid_Electric_Status";
+
     // Multi-instance FBs — instance data stored within this FB's own IDB.
     FreqResp_IDB : FB_PPC_FreqResponse;   // step ④: P-f droop, OFRT/UFRT trip
     QCap_IDB     : FB_PPC_QCapability;    // step ⑤: P-Q capability + Q ramp
@@ -202,7 +208,7 @@ BEGIN
             Plant_Mode   := #Plant_Mode,
             ForceStop    := TRUE,
             Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
-            SkidElectric := "SKID_ELECTRIC".Skids,
+            SkidElectric := #Skids,
             Ramps_Pcmd   := #Ramps_Pcmd,
             Ramps_Qcmd   := #QCap_IDB.Ramps_Qcmd,
             PrevError    := #PrevError_Arr,
@@ -252,7 +258,7 @@ BEGIN
     "FC_PPC_InverterMonitor"(
         WRtg_kW      := "PPC_Controller".WRtg_kW,
         Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
-        SkidElectric := "SKID_ELECTRIC".Skids,
+        SkidElectric := #Skids,
         N_Online     => #N_Online,
         PmaxPlant    => #PmaxPlant,
         QmaxPlant    => #QmaxPlant
@@ -393,7 +399,7 @@ BEGIN
         Plant_Mode   := #Plant_Mode,
         ForceStop    := FALSE,
         Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
-        SkidElectric := "SKID_ELECTRIC".Skids,
+        SkidElectric := #Skids,
         Ramps_Pcmd   := #Ramps_Pcmd,
         Ramps_Qcmd   := #QCap_IDB.Ramps_Qcmd,
         PrevError    := #PrevError_Arr,
