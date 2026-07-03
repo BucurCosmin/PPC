@@ -41,16 +41,18 @@ VAR_INPUT
     // Read once from SMA Modbus register 184 at commissioning and stored in DB39.
     // All inverters assumed to be the same model → single plant-level constant.
     WRtg_kW : REAL;
+
+    // Switchgear electric status per skid — read-only here.
+    // Written by FC_SkidElectricStatus (called 10x in OB30 before this FC).
+    // Declared VAR_INPUT (not VAR_IN_OUT) because this FC never writes to it,
+    // and VAR_IN_OUT of a static FB array causes a TIA Portal compile error.
+    SkidElectric : Array[0..9] of "Skid_Electric_Status";
 END_VAR
 
 VAR_IN_OUT
     // The 10-element inverter array from DB39 (PPC_Controller.PPC_Inverters).
-    // Passed IN_OUT so the FC reads directly from the live DB without copying.
+    // VAR_IN_OUT because Available is written back into this array each cycle.
     Inverters : Array[0..9] of "Inverter_controller";
-
-    // Switchgear electric status per skid (SKID_ELECTRIC DB). Written by
-    // FC_SkidElectricStatus, called 10x in OB30 before this FC.
-    SkidElectric : Array[0..9] of "Skid_Electric_Status";
 END_VAR
 
 VAR_OUTPUT
