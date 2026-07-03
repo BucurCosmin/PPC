@@ -10,22 +10,40 @@
 ```
 OB30 TICK (every 100 ms)
 │
-├─► [A] READ PHASE — FC04 Input Registers
+├─► [PRE] 10× FC_SkidElectricStatus
+│         Hardwired DI → SKID_ELECTRIC.Skids[i].ELECTRIC_OK
+│
+├─► [A] READ PHASE — FC04 Input Registers (per inverter via FB15 FSM states 1–3)
 │       ↓ on timeout/exception
 │       ├─ Set CommError := TRUE
 │       └─ Skip all writes for this inverter this cycle
 │
-├─► [B] PROCESS PHASE — PPC calculations
+├─► [B] PROCESS PHASE — FB_PPC_Controller
 │       ↓
-│       Derive: RemReady, Error, derating flags
-│       Compute: WSpt, VArSpt/PFSpt from PPC algorithm
+│       ① FC_PPC_InverterMonitor    → N_Online, PmaxPlant, QmaxPlant, Inverters[i].Available
+│       ② FC_PPC_ModeManager        → Plant_Mode (LOCAL/REMOTE/FALLBACK)
+│       ③ FC_PPC_RampControl        → Ramps_Pcmd (rate-limits AGC Cmd_P only)
+│       ④ FB_PPC_FreqResponse       → P_final_kW (adds P-f droop correction POST-ramp)
+│           ├─ Frequency source: f_meas or Freq_Test_Override (ISCE test bench)
+│           ├─ Dead band check → dP_droop or 0
+│           ├─ Dynamic band clamp [Pmin_active, Pmax_active]
+│           └─ Trip_FreqFault: P_final_kW = 0, Ramps_Pcmd reset
+│       ⑤ FB_PPC_QCapability        → Q_final_kVAr
+│           ├─ P-Q capability interpolation → Q_max_inductive, Q_max_capacitive
+│           ├─ Control mode: fixed-Q or voltage-droop Q command
+│           ├─ Q ramp rate limiting (fast or slow, ISCE Test 6)
+│           └─ Capability clamp → Q_limited flag
+│       ⑥ FC_PPC_PowerDistribution  → WSpt, WMode per inverter (uses P_final_kW)
+│       ⑦ FC_PPC_ReactiveControl    → VArSpt/PFSpt, VArMode per inverter (uses Q_final_kVAr)
+│       ⑧ FC_PPC_FaultHandler       → OperMode, ErrClr; AnyFault, AnyDerating, FaultMask
 │
-├─► [C] INTERLOCK CHECK
+├─► [C] INTERLOCK CHECK (embedded in FB_PPC_Controller / per-inverter logic)
 │       ↓
-│       ├─ IEC_Watchdog = FALSE?        → Hold setpoints, safe mode
-│       ├─ CommError = TRUE?            → Skip all writes
-│       ├─ Enabled = FALSE?             → Skip all writes
-│       ├─ SKID_ELECTRIC.ELECTRIC_OK = FALSE? → Exclude from N_online, skip writes
+│       ├─ IEC_Watchdog expired?          → FALLBACK mode → all inverters stop
+│       ├─ CommError = TRUE?              → Skip all writes, this inverter
+│       ├─ Enabled = FALSE?              → Not Available, excluded from dispatch
+│       ├─ SKID_ELECTRIC.ELECTRIC_OK = FALSE? → Not Available, setpoints zeroed
+│       ├─ Trip_FreqFault = TRUE?         → P_final_kW = 0, Ramps_Pcmd reset
 │       └─ Pass all → [D] WRITE PHASE
 │
 └─► [D] WRITE PHASE — FB15 FSM States 4/5/6 (FC16)
@@ -50,7 +68,7 @@ flowchart TD
         RD_MAP[Map registers to UDT:\nOpStt → RemReady\nErrStt → Error\nInvMs.TotW → Wactive\nInvMs.TotVAr → Qactive\nWAval, VArAval\nDrtStt, PwrOffReas]
     end
 
-    subgraph PROC["B — PROCESS PHASE"]
+    subgraph PROC["B — PROCESS PHASE (FB_PPC_Controller)"]
         P1{consecutive_fail ≥ 3?}
         P_SKIP([SKIP all writes\nthis cycle])
         P2{Error = TRUE?}
@@ -59,7 +77,10 @@ flowchart TD
         P_DERT[Limit WSpt/VArSpt\nto inverter constraint\nLog derating reason]
         P4{PwrOffReas = 21626?}
         P_LPSP[Increase WSpt above\ninverter minimum threshold]
-        P_CALC[PPC calculates:\nWSpt := P_cmd / N_online\nVArSpt or PFSpt from\nreactive dispatch]
+        P_CALC[①②③ InverterMonitor + ModeManager + RampControl\nRamps_Pcmd = rate-limited AGC Cmd_P\nN_Online, PmaxPlant, QmaxPlant, Available]
+        P_FREQ[④ FB_PPC_FreqResponse\ndroop: dP = -2·Pn·df/Droop_pct\ndead band check\nP_final_kW = LIMIT Pmin_active..Pmax_active\nTrip_FreqFault → P=0 + Ramps_Pcmd reset]
+        P_QCAP[⑤ FB_PPC_QCapability\nP-Q table interpolation → Q_max limits\nQ command fixed or U-droop\nQ ramp fast/slow → Q_final_kVAr clamped\nQ_limited diagnostic]
+        P_DIST[⑥⑦⑧ PowerDistribution + ReactiveControl + FaultHandler\nWSpt proportional P_final_kW by WAval\nVArSpt proportional Q_final_kVAr by VArAval\nOperMode + ErrClr overrides]
     end
 
     subgraph ILOCK["C — INTERLOCK CHECK"]
@@ -97,7 +118,7 @@ flowchart TD
     P3 -- No --> P4
     P4 -- Yes --> P_LPSP --> P_CALC
     P4 -- No --> P_CALC
-    P_CALC --> IL0
+    P_CALC --> P_FREQ --> P_QCAP --> P_DIST --> IL0
     IL0 -- Yes --> IL_WD --> W_DONE
     IL0 -- No --> IL1
     IL1 -- Yes --> IL_BLOCK
@@ -162,17 +183,37 @@ READ  ─► OpStt ─► {3526=GridFeed, 3527=FRT, 3530=RampDown} → RemReady=
          WAval ─► Available power fraction [pu×10000]
          DrtStt ─► Derating reason (973 = none)
 
-PPC   ─► WSpt_new = Targets_P × 1/N_online  (or per availability)
-          VArSpt_new = Targets_Q × 1/N_online
-          Apply ramp limits (P_RampUp / P_RampDown)
+PPC ①②③:
+         N_Online, PmaxPlant, QmaxPlant, Available[i] computed
+         Plant_Mode determined from watchdog + HMI
+         Ramps_Pcmd = rate-limited Cmd_P (AGC only, not droop)
 
-CHECK ─► DrtStt active? Clamp WSpt_new to WAval × WRtg
-          Error? Hold WSpt, raise alarm
+PPC ④ (P-f droop — ANRE Art.114–120):
+         f_active = f_meas or Freq_Test_Override
+         df = f_active − 50.0
+         IF |df| > DeadBand_mHz/1000:
+             dP_droop = −(2 × 48000 × df) / Droop_pct   [kW]
+         P_final_kW = LIMIT(Pmin_active, Ramps_Pcmd + dP_droop, Pmax_active)
+         Trip if f > 51.5 or f < 47.5 → P_final_kW = 0
+
+PPC ⑤ (P-Q capability — ANRE Art.147, 160):
+         P_pct = P_actual_kW / (Pn_MW × 1000) × 100
+         Interpolate PQ_Table → Q_max_inductive, Q_max_capacitive
+         Q_command from fixed-Q or U-droop (VArControl_Mode)
+         Q ramp applied → Q_final_kVAr clamped to capability envelope
+
+PPC ⑥⑦:
+         WSpt_i = P_final_kW × (WAval_i / ΣWAval_j)    [kW, per available inverter]
+         VArSpt_i = Q_final_kVAr × (VArAval_i / ΣVArAval_j)  (mode 1)
+    OR   PFSpt_i = Cmd_PF × 10000                              (mode 2)
+
+CHECK ─► Error? Hold WSpt, raise alarm
           CommError? Skip writes
+          NOT ELECTRIC_OK? Exclude from dispatch
 
-WRITE ─► [108] = WSpt_new   [kW]
-          [112] = VArSpt_new [kVAr]   (if VArCtlCom mode)
-     OR  [114] = PFSpt_new  [×10000]  (if PFCtlCom mode)
+WRITE ─► [108] = WSpt_i    [kW, FIX0]
+          [112] = VArSpt_i  [kVAr, FIX0]  (if VArCtlCom mode)
+     OR  [114] = PFSpt_i   [×10000, FIX4] (if PFCtlCom mode)
 ```
 
 ---
@@ -244,16 +285,18 @@ RECOVERY:
 
 | Condition | Effect on Writes | Register / Signal |
 |---|---|---|
-| `IEC_Watchdog = FALSE` | Hold last setpoints, no new commands to PPC | FB_PPC_Controller input — wire from upstream SCADA/IEC104 status |
-| `CommError = TRUE` | Block ALL writes to this inverter | Internal UDT flag |
-| `SKID_ELECTRIC.SkidN.ELECTRIC_OK = FALSE` | Exclude skid from N_online, block ALL writes to this skid | `SKID_ELECTRIC` DB — switchgear breaker/separator/earthing status |
-| `Enabled = FALSE` | Block ALL writes to this inverter | DB39.Skid[i].Enabled |
-| `ErrStt = Error (1392)` | Block setpoint writes (WSpt/VArSpt/PFSpt) | Input reg 94 |
+| `IEC_Watchdog = FALSE` | FALLBACK mode → all inverters stop via OperMode=303 | FB_PPC_Controller input — wire from upstream SCADA/IEC104 |
+| `CommError = TRUE` | Block ALL writes to this inverter | Internal UDT flag (comms block) |
+| `SKID_ELECTRIC.SkidN.ELECTRIC_OK = FALSE` | Exclude from N_online, zero setpoints, AnyFault=TRUE | `SKID_ELECTRIC` DB — hardwired DI (breaker/separator/earthing) |
+| `Enabled = FALSE` | Not Available — excluded from dispatch (operator control, never auto-overwritten) | DB39 Inverters[i].Enabled |
+| `ErrStt = Error (1392)` | Block setpoint writes (WSpt/VArSpt/PFSpt); ErrClr=0 | Input reg 94 |
+| `Trip_FreqFault = TRUE` | P_final_kW = 0; Ramps_Pcmd reset; setpoints zeroed | FB_PPC_FreqResponse output — f out of [UFRT, OFRT] range |
+| `Q_limited = TRUE` | Q_final_kVAr clamped to P-Q capability envelope | FB_PPC_QCapability output — VArSpt reduced |
 | `OperMode = 308` | Write RemRdy=308 **before** InvOpMod=308 | Holding regs 2, 0 |
 | `OperMode = 303` | Write RemRdy=303 **before** InvOpMod=303 | Holding regs 2, 0 |
 | `ErrClr ≠ 0` | Write Holding[8]=26 THIS cycle only — self-clear on State 5 transition | Holding reg 8 |
-| `DrtStt active` | Clamp WSpt to available power limit | Input reg 176 |
-| `PwrOffReas = 21626` | Raise WSpt above inverter minimum threshold | Input reg 178 |
+| `DrtStt active` | AnyDerating=TRUE; WAval already reflects derating — distribution self-corrects | Input reg 176 |
+| `PwrOffReas ≠ 0` | OperMode=308 maintained; WSpt=0; AnyFault=TRUE | Input reg 178 |
 | `OpStt = FRT (3527)` | Do not send stop command | Input reg 98 |
 
 ---
@@ -414,4 +457,188 @@ END_IF;
 
 ---
 
-*Document version: updated 2026-06-06 | Additions: SKID_ELECTRIC switchgear availability interlock folded into FC_PPC_InverterMonitor.Available (single source of truth across PowerDistribution/ReactiveControl/FaultHandler), IEC_Watchdog interlock, FB15 6-state FSM write sequence, FC17 race condition fix, ErrClr one-shot implementation | Source: MODBUS-SCxxxx-TI-en-19 + SCADA Register Map XLSX*
+---
+
+## 13. P-f Droop Response — FB_PPC_FreqResponse (ANRE Ord 51/2019)
+
+### 13.1 Architecture decision — droop post-ramp
+
+```
+AGC Cmd_P ──► FC_PPC_RampControl ──► Ramps_Pcmd ──► FB_PPC_FreqResponse ──► P_final_kW
+                 (rate-limited)                        (droop correction,
+                                                        no rate limit)
+```
+
+Droop correction is added **after** the P ramp. This means:
+- Normal AGC setpoint changes: rate-limited by RampControl (X kW/s)
+- Frequency event ±200 mHz: droop delta applied **immediately**, not rate-capped
+- Satisfies ANRE primary frequency response timing requirements
+
+### 13.2 Frequency source selection (ISCE requirement)
+
+```
+Frequency_Source_Sel = FALSE → f_active = f_meas        (grid AI, normal operation)
+Frequency_Source_Sel = TRUE  → f_active = Freq_Test_Override  (ISCE 4–20 mA test bench)
+```
+
+Both are SCADA-writable. The test bench covers 47.5–52.0 Hz. Switch source without code change during ISCE campaign.
+
+### 13.3 Droop formula
+
+```
+Pn_kW  = Pn_MW × 1000 = 48 000 kW  (DB parameter, configurable)
+df     = f_active − f_nom (50.0 Hz)
+
+IF |df| ≤ DeadBand_mHz / 1000:
+    dP_droop = 0                               ← inside dead band, hard cutout
+
+ELSE:
+    dP_droop = −(2 × Pn_kW × df) / Droop_pct  ← over-freq: reduce P; under-freq: increase P
+
+P_cmd_raw  = Ramps_Pcmd + dP_droop
+P_final_kW = LIMIT(Pmin_active, P_cmd_raw, Pmax_active)
+```
+
+Example — Droop_pct = 8%, df = +0.5 Hz (over-frequency):
+`dP_droop = −(2 × 48000 × 0.5) / 8 = −6000 kW` → reduce plant by 6 MW.
+
+### 13.4 Dynamic Pmin/Pmax band
+
+Reserves headroom so the full ±200 mHz droop response always fits within the operable range:
+
+```
+dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct   ← headroom at reference deviation
+Pmin_active  = Pmin_stab + dP_at_200mHz
+Pmax_active  = PmaxPlant − dP_at_200mHz             ← tracks irradiance every cycle
+```
+
+### 13.5 Trip and reconnect sequence
+
+```
+NORMAL: f ∈ [47.5, 51.5] Hz
+    → dP_droop applied; Trip_Latch = FALSE
+
+TRIP: f > 51.5 Hz (OFRT) or f < 47.5 Hz (UFRT)
+    → Trip_Latch := TRUE
+    → P_final_kW := 0 (immediate)
+    → FB_PPC_Controller resets Ramps_Pcmd := 0
+
+RECONNECT: operator sets Reconnect_Enable rising edge (f back in band)
+    → Trip_Latch := FALSE
+    → Reconnect_Timer_s starts (elapsed time measurement)
+    → Ramps_Pcmd ramps up from 0 toward Cmd_P via RampControl
+    → Reconnecting = TRUE while P_final_kW < 95% Pmax_active
+    → Reconnect_Timer_s freezes when Reconnecting goes FALSE
+
+Reconnect_Timer_s → SCADA / ISCE Test 7 timing measurement
+```
+
+**Note:** No physical breaker is tripped — only inverter setpoints are zeroed. `OperMode=308` is maintained for healthy inverters (FaultHandler), so reconnect is a ramp-up only, not a full restart sequence.
+
+### 13.6 Configurable parameters (all SCADA-writable, stored in DB39)
+
+| Parameter | Default | ISCE test use |
+|---|---|---|
+| Droop_pct | 8.0 | Tests 1–4 at 8% and 10% |
+| DeadBand_mHz | 200.0 | Set to 0 for Art.117 50 mHz sub-test |
+| Pmin_stab | 0.0 | Plant-specific minimum |
+| OFRT_Trip_Hz | 51.5 | Art.118–120 |
+| UFRT_Trip_Hz | 47.5 | Art.118–120 |
+| Reconnect_Enable | — | Operator button / SCADA command |
+| Frequency_Source_Sel | FALSE | TRUE during ISCE test window |
+| Freq_Test_Override | — | Set from ISCE test bench interface |
+
+---
+
+## 14. P-Q Capability and Voltage Control — FB_PPC_QCapability (ANRE Ord 51/2019)
+
+### 14.1 Control flow
+
+```
+P_actual_kW, Pmax_kW
+      │
+      ▼
+PQ_Table interpolation ──► Q_max_inductive, Q_max_capacitive
+                                       │
+VArControl_Mode ──► Q_command ──► Q ramp ──► Q_final_kVAr (clamped)
+   0: Q_setpoint_ext                             │
+   1: U-droop calc                               ▼
+   2: 0                              FC_PPC_ReactiveControl
+                                     (distributes Q_final_kVAr per inverter)
+```
+
+### 14.2 P-Q capability table (ISCE Test 8 — Art. 147, 152)
+
+```
+P operating point → P_pct = P_actual_kW / Pmax_kW × 100
+
+PQ_Table[0..4]  (configure in QCap instance DB before ISCE Test 8):
+  Index 0: P_pct = 0%,   Q_ind_max = [kVAr], Q_cap_max = [kVAr]
+  Index 1: P_pct = 25%,  Q_ind_max = [kVAr], Q_cap_max = [kVAr]
+  Index 2: P_pct = 50%,  Q_ind_max = [kVAr], Q_cap_max = [kVAr]
+  Index 3: P_pct = 75%,  Q_ind_max = [kVAr], Q_cap_max = [kVAr]
+  Index 4: P_pct = 100%, Q_ind_max = [kVAr], Q_cap_max = [kVAr]
+
+Linear interpolation between bracketing rows:
+  tbl_idx  = FLOOR(P_pct / 25)         // 0..3
+  t0       = (P_pct − tbl_idx×25) / 25  // 0.0..1.0
+  Q_limits = PQ_Table[tbl_idx] + t0 × (PQ_Table[tbl_idx+1] − PQ_Table[tbl_idx])
+
+Q_final_kVAr = LIMIT(−Q_ind_max, Ramps_Qcmd, +Q_cap_max)
+Q_limited = TRUE if clamped
+```
+
+### 14.3 Voltage droop Q control (ISCE Test 9 — Art. 160, 163)
+
+Activated by `VArControl_Mode = 1` in DB39:
+
+```
+dU_pu     = (U_setpoint_ext − U_meas) / U_meas    // fractional per-unit voltage error
+Q_command = (dU_pu / (U_Droop_pct / 100)) × QmaxPlant
+
+Example: U_nom=20 kV, U_spt=20.5, U_meas=20.0, U_Droop_pct=5%, QmaxPlant=15000 kVAr
+  dU_pu     = 0.5/20 = 0.025 (2.5% per-unit)
+  Q_command = (0.025 / 0.05) × 15000 = 7500 kVAr  (50% reactive response)
+```
+
+Then Q ramp applied, then P-Q capability clamp. Stable across full P range including P=0 (Test 10).
+
+### 14.4 Q ramp (ISCE Test 6)
+
+Two independently-selectable rates, switched via `Q_Ramp_Fast_Sel` (SCADA-writable):
+
+```
+Q_ramp_rate = Q_Ramp_Rate_fast  (if Q_Ramp_Fast_Sel = TRUE)
+            = Q_Ramp_Rate_slow   (if Q_Ramp_Fast_Sel = FALSE)
+
+delta = effectiveTarget − Ramps_Qcmd
+IF delta > 0: Ramps_Qcmd += MIN(delta, Q_ramp_rate × CycleTime_s)
+ELSIF delta < 0: Ramps_Qcmd −= MIN(|delta|, Q_ramp_rate × CycleTime_s)
+
+In FALLBACK: effectiveTarget = 0 → Q descends gracefully
+```
+
+`Ramps_Qcmd` (static in `QCap_IDB`) replaces the old `Ramps_Qcmd` static in `FB_PPC_Controller`. Reset via `QCap_IDB.Ramps_Qcmd := 0.0` in EN_PPC=FALSE guard and FALLBACK recovery.
+
+### 14.5 Zero-P reactive capability (ISCE Test 10 — Art. 150, 152)
+
+When plant P ≈ 0 for ≥30 min, the plant must still source/sink Q on command:
+- Q dispatch is NOT gated on P > 0 anywhere in the code
+- `FaultHandler` maintains `OperMode = 308` for all healthy inverters regardless of WSpt
+- Inverters with `OperMode = 308` and `WSpt = 0` respond to `VArSpt` normally
+- Verify: do not add any `IF P_actual > threshold` guard to Q dispatch
+
+### 14.6 VArControl_Mode vs Plant_VArMode
+
+Two separate mode selectors serve different purposes:
+
+| Parameter | Location | Values | Purpose |
+|---|---|---|---|
+| `Plant_VArMode` (Cmd_VArMode) | FB_PPC_Controller input | 0=Off, 1=Q dispatch, 2=PF | How ReactiveControl distributes reactive output to inverters |
+| `VArControl_Mode` | DB39 config | 0=fixed Q, 1=U droop, 2=off | How QCapability computes the plant-level Q command |
+
+Example for U-droop operation: set `Plant_VArMode = 1` (ReactiveControl distributes Q proportionally) AND `VArControl_Mode = 1` (QCapability computes Q from voltage error). For PF mode: `Plant_VArMode = 2` (uniform PF), `VArControl_Mode = 2` (QCapability outputs 0 — bypassed).
+
+---
+
+*Document version: 2026-07-03 | Additions: FB_PPC_FreqResponse P-f droop (sections 1, 2, 4, 8, 13), FB_PPC_QCapability P-Q capability + Q ramp (sections 1, 2, 4, 8, 14), call chain updated to 8 steps, Trip_FreqFault and Q_limited interlock rows, Q ramp relocation from ReactiveControl to QCapability | Previous additions: SKID_ELECTRIC interlock, IEC_Watchdog, FB15 6-state FSM write sequence, FC17 race condition fix | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026; MODBUS-SCxxxx-TI-en-19*

@@ -2,443 +2,322 @@
 
 ## Overview
 
-Plant Power Controller (PPC) for SMA inverter plant running on Siemens S7-1500.
-Implementation language: SCL. Structure: one main **FB** calling multiple **FCs** for maintainability.
+Plant Power Controller (PPC) for SMA Sunny Central inverter plant running on Siemens S7-1500.
+Implementation language: SCL. Structure: one main **FB** calling multiple **FCs/FBs** for maintainability.
+Grid-code compliance: ANRE Ordinul 51/2019, ANRE Ordinul 60/2024, Category D.
 
 ---
 
-## Data Structures (from TIA Portal exports)
+## Data Structures
 
 ### UDT: `Inverter_controller`
 
+| Field | Type | Direction | Description |
+|---|---|---|---|
+| Enabled | Bool | Config (operator) | Inverter enabled in PPC — never overwritten by automatic logic |
+| RemReady | Bool | Feedback | Inverter reports remote-ready |
+| Error | Bool | Feedback | Active inverter fault |
+| CommError | Bool | Comms block | Modbus link broken |
+| Available | Bool | Computed | Combined online criteria (step ①). Single source of truth for all downstream FCs |
+| OperMode | DInt | Write | InvOpMod setpoint (308=Operation, 303=Stop) |
+| Wactive | DInt | Feedback | Measured active power (pu×10000, FIX4) |
+| Qactive | DInt | Feedback | Measured reactive power (pu×10000, FIX4) |
+| WMode | DInt | Write | GriMng.WMod (1079=WCtlCom, 303=Off) |
+| VArMode | DInt | Write | GriMng.VArMod (1072=VArCtlCom, 1075=PFCtlCom, 303=Off) |
+| WSpt | DInt | Write | Active power setpoint (kW direct, FIX0) |
+| VArSpt | DInt | Write | Reactive power setpoint (kVAr direct, FIX0) |
+| PFSpt | DInt | Write | Power factor setpoint (PF×10000, FIX4) |
+| WAval | DInt | Feedback | Available active power (pu×10000, FIX4) |
+| VArAval | DInt | Feedback | Available reactive power (pu×10000, FIX4) |
+| PwrOffReas | DInt | Feedback | Power-off reason code |
+| DrtStt | DInt | Feedback | Derating state |
+| ErrClr | DInt | Write | Fault acknowledge (26=Ackn one-shot, 0=idle) |
+
+### UDT: `Skid_Electric_Status`
+
 | Field | Type | Description |
 |---|---|---|
-| Enabled | Bool | Inverter enabled flag |
-| RemReady | Bool | Remote-ready status |
-| Error | Bool | Inverter fault |
-| CommError | Bool | Communication fault |
-| OperMode | DInt | InvOpMod setpoint → to inverter (308=Operation, 303=Stop) |
-| Wactive | DInt | Active power actual (feedback, from InvMs.TotW input reg 28) |
-| Qactive | DInt | Reactive power actual (feedback) |
-| WMode | DInt | Active power control mode selection |
-| VArMode | DInt | Reactive power control mode selection |
-| WSpt | DInt | Active power setpoint → to inverter |
-| VArSpt | DInt | Reactive power setpoint → to inverter |
-| PFSpt | DInt | Power factor setpoint → to inverter |
-| WAval | DInt | Available active power (from inverter) |
-| VArAval | DInt | Available reactive power (from inverter) |
-| PwrOffReas | DInt | Power-off reason code |
-| DrtStt | DInt | Derating state |
+| Sep_Cel1 | Bool | Output cell 1 separator — TRUE = closed |
+| Clp_Cel1 | Bool | Output cell 1 earthing switch — TRUE = closed (earthed) |
+| Sep_Cel2 | Bool | Output cell 2 separator — TRUE = closed |
+| Clp_Cel2 | Bool | Output cell 2 earthing switch — TRUE = closed (earthed) |
+| Intrerup_CelTraf | Bool | Transformer cell breaker — TRUE = closed |
+| Sep_CelTraf | Bool | Transformer cell separator — TRUE = closed |
+| Clp_CelTraf | Bool | Transformer cell earthing switch — TRUE = closed (earthed) |
+| Cel1_OK | Bool | Computed: Sep_Cel1 AND NOT Clp_Cel1 |
+| Cel2_OK | Bool | Computed: Sep_Cel2 AND NOT Clp_Cel2 |
+| CelTraf_OK | Bool | Computed: Intrerup AND Sep AND NOT Clp |
+| ELECTRIC_OK | Bool | Computed: Cel1_OK AND Cel2_OK AND CelTraf_OK |
 
-### DB39: `PPC_Controller`
+### UDT: `UDT_PQ_CapPoint`
 
-**Inverter references:**
-- `PPC_Inverters`: `Array[0..9] of Inverter_controller` — used internally by PPC logic; passed as VAR_IN_OUT to each FC
-- `Inverter1..Inverter10`: Individual named instances — same physical inverters as above, used for HMI/SCADA visibility only (read-only mirror, not written by PPC FCs)
+| Field | Type | Description |
+|---|---|---|
+| P_pct | Real | % of rated power (configure as 0, 25, 50, 75, 100) |
+| Q_ind_max | Real | kVAr, inductive (lagging/underexcited) Q limit at this P tier |
+| Q_cap_max | Real | kVAr, capacitive (leading/overexcited) Q limit at this P tier |
 
-**Plant-level signals:**
+---
 
-| Field | Type | Unit | Description |
+## DB39: `PPC_Controller`
+
+### Inverter references
+
+- `Inverters.PPC_Inverters`: `Array[0..9] of Inverter_controller` — written by PPC FCs; passed as VAR_IN_OUT
+- `Inverter1..Inverter10`: Named instances for HMI/SCADA visibility only (read mirrors, not written by PPC)
+
+### Plant-level fields
+
+| Field | Type | Unit | Written by | Description |
+|---|---|---|---|---|
+| WRtg_kW | Real | kW | Config | Rated active power per inverter |
+| P_RampUp | Real | kW/s | Config | Max active power ramp-up rate |
+| P_RampDown | Real | kW/s | Config | Max active power ramp-down rate |
+| Plant_N_Online | Int | — | FB after ① | Online inverter count |
+| Limits_PmaxPlant | Real | kW | FB after ① | Available plant active power |
+| Limits_QmaxPlant | Real | kVAr | FB after ① | Available plant reactive power |
+| Plant_Mode | Int | — | FB after ② | 0=LOCAL / 1=REMOTE_IEC / 2=FALLBACK |
+| Ramps_Pcmd | Real | kW | FB after ③ | Ramped P command (HMI trending) |
+| AnyFault | Bool | — | FB after ⑧ | Any inverter fault active |
+| AnyDerating | Bool | — | FB after ⑧ | Any derating state active |
+| FaultMask | Word | — | FB after ⑧ | Bit i = inverter i faulted |
+| Ramps_Qcmd | Real | kVAr | FB after ⑤ | Q ramp accumulator mirror (lives in QCap_IDB.Ramps_Qcmd) |
+
+### Frequency response parameters (ANRE Ord 51/2019, SCADA-writable)
+
+| Field | Type | Default | Description |
 |---|---|---|---|
-| START_CONTROLLER | Bool | — | Enable PPC logic |
-| WRtg_kW | Real | kW | Rated active power per inverter (from register 184); used to convert WAval from pu to kW |
-| P_RampUp | Real | kW/s | Active power ramp-up rate |
-| P_RampDown | Real | kW/s | Active power ramp-down rate |
-| Q_Ramp | Real | kVAr/s | Reactive power ramp rate |
-| PF_Ramp | Real | /s | Power factor ramp rate |
-| Plant_P_meas | Real | kW | Measured plant active power (PCC) |
-| Plant_Q_meas | Real | kVAr | Measured plant reactive power (PCC) |
-| Plant_N_Online | Int | — | Number of inverters currently online |
-| Plant_Mode | Int | — | 0=LOCAL / 1=REMOTE_IEC / 2=FALLBACK (set by ModeManager) |
-| Plant_VArMode | Int | — | 0=Off / 1=Q / 2=PF (written from FB input Cmd_VArMode) |
-| AnyFault | Bool | — | TRUE if any inverter fault active (set by FaultHandler) |
-| Targets_P | Real | kW | Active power target — written by FB from its IN parameter each cycle |
-| Targets_Q | Real | kVAr | Reactive power target — written by FB from its IN parameter each cycle |
-| Targets_PF | Real | — | Power factor target — written by FB from its IN parameter each cycle |
-| Limits_PmaxPlant | Real | kW | Sum of online WAval in kW (computed by InverterMonitor) |
-| Limits_QmaxPlant | Real | kVAr | Sum of online VArAval in kVAr (computed by InverterMonitor) |
-| Ramps_Pcmd | Real | kW | Ramped P command (internal, output of RampControl) |
+| f_nom | Real | 50.0 | Hz, nominal grid frequency |
+| Pn_MW | Real | 48.0 | MW, plant nominal rated power |
+| Droop_pct | Real | 8.0 | %, droop setting (ISCE tests at 8.0 and 10.0) |
+| DeadBand_mHz | Real | 200.0 | mHz, dead band (0 for Art.117 fine-response sub-test) |
+| Pmin_stab | Real | 0.0 | kW, minimum stable power |
+| OFRT_Trip_Hz | Real | 51.5 | Hz, over-frequency trip threshold |
+| UFRT_Trip_Hz | Real | 47.5 | Hz, under-frequency trip threshold |
+| Reconnect_Enable | Bool | — | Rising edge clears frequency trip latch |
+
+### Frequency response diagnostics (SCADA-readable, ISCE acquisition)
+
+| Field | Type | Description |
+|---|---|---|
+| dP_droop | Real | kW, droop correction term (ISCE live signal) |
+| FreqResp_Pmin | Real | kW, dynamic Pmin_active |
+| FreqResp_Pmax | Real | kW, dynamic Pmax_active |
+| Trip_FreqFault | Bool | Frequency trip active alarm |
+| Reconnecting | Bool | Trip cleared, ramping back to full power |
+| Reconnect_Timer_s | Real | s, reconnect duration (ISCE Test 7 timing) |
+
+### Q capability parameters (ANRE Ord 51/2019, SCADA-writable)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| VArControl_Mode | Int | 0 | 0=fixed Q, 1=U droop, 2=off (separate from Plant_VArMode) |
+| U_setpoint_ext | Real | — | kV, voltage setpoint for U droop mode |
+| U_Droop_pct | Real | 5.0 | %, voltage droop gain |
+| Q_Ramp_Rate_fast | Real | — | kVAr/s, fast Q ramp (ISCE Test 6) |
+| Q_Ramp_Rate_slow | Real | — | kVAr/s, slow Q ramp (ISCE Test 6) |
+| Q_Ramp_Fast_Sel | Bool | — | FALSE=slow, TRUE=fast |
+
+### Q capability diagnostics (SCADA-readable, ISCE Test 8/9)
+
+| Field | Type | Description |
+|---|---|---|
+| Q_max_inductive | Real | kVAr, P-Q capability inductive limit at current P |
+| Q_max_capacitive | Real | kVAr, P-Q capability capacitive limit at current P |
+| Q_limited | Bool | TRUE when Q clamped by P-Q capability envelope |
 
 ---
 
 ## Architecture
 
 ```
-FB_PPC_Controller  (main FB, called every PLC cycle)
-│
-├── FC_PPC_InverterMonitor      ① Scan inverters, count online, sum WAval
-├── FC_PPC_ModeManager          ② Determine Plant_Mode (LOCAL / REMOTE / FALLBACK)
-├── FC_PPC_RampControl          ③ Apply ramp rates → produce Ramps_Pcmd
-├── FC_PPC_PowerDistribution    ④ Distribute P setpoint equally among online inverters
-├── FC_PPC_ReactiveControl      ⑤ Distribute Q or PF setpoint
-└── FC_PPC_FaultHandler         ⑥ Handle CommError / inverter errors / watchdog
+OB30 (every 100 ms)
+  │
+  ├─ 10× FC_SkidElectricStatus    // DI → SKID_ELECTRIC.Skids[0..9].ELECTRIC_OK
+  ├─ 10× FC_PPC_SkidMapping       // Modbus bridge
+  │
+  └─ FB_PPC_Controller
+        │
+        ├─ ①  FC_PPC_InverterMonitor    → N_Online, PmaxPlant, QmaxPlant, Inverters[i].Available
+        ├─ ②  FC_PPC_ModeManager        → Plant_Mode (LOCAL / REMOTE_IEC / FALLBACK)
+        ├─ ③  FC_PPC_RampControl        → Ramps_Pcmd (rate-limits AGC Cmd_P changes only)
+        ├─ ④  FB_PPC_FreqResponse       → P_final_kW (droop correction added POST-ramp)
+        │        └─ if Trip_FreqFault: P_final_kW = 0 AND Ramps_Pcmd reset to 0
+        ├─ ⑤  FB_PPC_QCapability        → Q_final_kVAr (P-Q clamp + Q ramp + U droop)
+        ├─ ⑥  FC_PPC_PowerDistribution  → WSpt, WMode per inverter (input = P_final_kW)
+        ├─ ⑦  FC_PPC_ReactiveControl    → VArSpt/PFSpt/VArMode per inverter (input = Q_final_kVAr)
+        └─ ⑧  FC_PPC_FaultHandler       → OperMode overrides; AnyFault, AnyDerating, FaultMask
 ```
 
-Call order matters — each FC feeds results to the next.
+**Call order is mandatory.** Each step feeds the next. Steps ④ and ⑤ are FBs (retain state between OB30 cycles); steps ①②③⑥⑦⑧ are FCs (stateless).
 
 ---
 
 ## Operating Modes
 
-| Mode value | Name | Description |
+| Mode | Value | Description |
 |---|---|---|
-| 0 | LOCAL | Targets come from HMI/local DB; no remote command needed |
-| 1 | REMOTE_IEC | Targets received via IEC 61850 / Modbus TCP from grid operator |
-| 2 | FALLBACK | Communication lost → revert to safe fallback power level |
-
-Mode transitions:
-- LOCAL → REMOTE_IEC: when communication link is healthy and `START_CONTROLLER = TRUE`
-- REMOTE_IEC → FALLBACK: when IEC watchdog times out (e.g. no telegram for >30 s)
-- FALLBACK → REMOTE_IEC: when communication is restored and watchdog is reset
+| LOCAL | 0 | Targets from HMI; no upstream comms required |
+| REMOTE_IEC | 1 | Targets from SCADA/grid operator; PPC active |
+| FALLBACK | 2 | Comms lost (watchdog expired); all inverters ramped to zero |
 
 ---
 
-## FC Specifications
+## FC/FB Specifications
+
+### FC_PPC_InverterMonitor (step ①)
+
+Scans all 10 inverters. Computes `Inverters[i].Available` (6-condition check) — the single source of truth consumed by all downstream FCs.
+
+**6 online conditions (ALL must be TRUE):**
+1. `Enabled` — operator enabled
+2. `RemReady` — inverter in remote-ready state
+3. `NOT Error` — no active fault
+4. `NOT CommError` — Modbus link healthy
+5. `PwrOffReas = 0` — no abnormal disconnect
+6. `SKID_ELECTRIC.Skids[i].ELECTRIC_OK` — switchgear in deliverable state
+
+**Outputs:** `N_Online`, `PmaxPlant` (sum of WAval×WRtg_kW for available inverters), `QmaxPlant` (sum of VArAval×WRtg_kW).
 
 ---
 
-### FC_PPC_InverterMonitor
+### FC_PPC_ModeManager (step ②)
 
-**Purpose:** Iterate over all 10 inverters, aggregate status and available power.
+Evaluates watchdog and HMI selector → sets `Plant_Mode`. Priority: LOCAL > FALLBACK > REMOTE_IEC. Recovery from FALLBACK is automatic when watchdog resets.
 
-**Inputs (via PPC_Controller DB):** `PPC_Inverters[0..9]`
+---
 
-**Outputs written to DB:**
-- `Plant_N_Online` — count of inverters where `Enabled=TRUE AND RemReady=TRUE AND NOT Error AND NOT CommError`
-- `Limits_PmaxPlant` — sum of `WAval` for all online inverters (in kW, scaled if needed)
+### FC_PPC_RampControl (step ③)
 
-**WAval/VArAval scaling:** Both are pu × 10000 (FIX4). To convert to engineering units:
-- `kW   = DINT_TO_REAL(WAval)  / 10000.0 × WRtg_kW`
-- `kVAr = DINT_TO_REAL(VArAval)/ 10000.0 × WRtg_kW`  *(VArRtg approximated = WRtg for same-model inverters)*
+Rate-limits the AGC `Cmd_P` input only. Produces `Ramps_Pcmd` — the smoothed base command that feeds into step ④.
 
-**For proportional distribution** the WRtg factor cancels when computing shares (WAval_i / ΣWAval_j), so raw DInt values can be used directly for ratio math — WRtg is only needed for the absolute kW limit (Limits_PmaxPlant).
+**Does NOT limit frequency droop response** — droop is added in step ④ after this FC.
 
-**Logic sketch:**
-```scl
-Plant_N_Online   := 0;
-Limits_PmaxPlant := 0.0;
-Limits_QmaxPlant := 0.0;
+---
 
-FOR i := 0 TO 9 DO
-    IF PPC_Inverters[i].Enabled
-       AND PPC_Inverters[i].RemReady
-       AND NOT PPC_Inverters[i].Error
-       AND NOT PPC_Inverters[i].CommError
-    THEN
-        Plant_N_Online   := Plant_N_Online + 1;
-        // Convert pu×10000 → kW/kVAr using rated power
-        Limits_PmaxPlant := Limits_PmaxPlant
-            + (DINT_TO_REAL(PPC_Inverters[i].WAval)   / 10000.0 * WRtg_kW);
-        Limits_QmaxPlant := Limits_QmaxPlant
-            + (DINT_TO_REAL(PPC_Inverters[i].VArAval) / 10000.0 * WRtg_kW);
-    END_IF;
-END_FOR;
+### FB_PPC_FreqResponse (step ④) — ANRE Ord 51/2019 Art. 114–120
+
+**Purpose:** Primary frequency response (RFA). Adds droop correction POST-ramp so frequency events are immediate — not rate-capped by RampControl.
+
+**Droop formula:**
+```
+df      = f_active − f_nom
+dP_droop = −(2 × Pn_kW × df) / Droop_pct     [kW]
+P_final_kW = LIMIT(Pmin_active, Ramps_Pcmd + dP_droop, Pmax_active)
 ```
 
----
-
-### FC_PPC_ModeManager
-
-**Purpose:** Evaluate communication watchdog and set `Plant_Mode`.
-
-**Inputs:**
-- IEC/Modbus watchdog heartbeat bit (external input to FB, toggling on each received telegram)
-- `START_CONTROLLER`
-- Configurable watchdog timeout (static var in FB, default T#30S)
-
-**Logic:**
-1. If `START_CONTROLLER = FALSE` → hold outputs, no mode change
-2. If watchdog heartbeat toggles within timeout → `Plant_Mode := 1` (REMOTE_IEC)
-3. If watchdog timeout expires (no toggle for >30 s) → `Plant_Mode := 2` (FALLBACK)
-4. If HMI forces LOCAL override → `Plant_Mode := 0`
-
-**Watchdog implementation:**
-- Detect rising edge of `IEC_Watchdog` bit to confirm new telegram received
-- `TON` timer: reset (`IN := FALSE` pulse) on each edge; if `Q = TRUE` → FALLBACK
-- Called every OB30 tick (100 ms); timer runs in FB static memory
-
----
-
-### FC_PPC_RampControl
-
-**Purpose:** Limit the rate of change of the P command to protect inverters and grid.
-
-**Inputs:** `Targets_P`, `P_RampUp`, `P_RampDown`, cycle time `dt`
-
-**Output:** `Ramps_Pcmd`
-
-**Logic:**
-```scl
-delta := Targets_P - Ramps_Pcmd;
-
-IF delta > 0.0 THEN
-    // Ramping up
-    Ramps_Pcmd := Ramps_Pcmd + MIN(delta, P_RampUp * dt);
-ELSIF delta < 0.0 THEN
-    // Ramping down
-    Ramps_Pcmd := Ramps_Pcmd - MIN(ABS(delta), P_RampDown * dt);
-END_IF;
-
-// Apply absolute limit
-Ramps_Pcmd := MIN(Ramps_Pcmd, Limits_PmaxPlant);
-Ramps_Pcmd := MAX(Ramps_Pcmd, 0.0);
+**Dynamic band (Note 1, ISCE test program):**
+```
+dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct
+Pmin_active  = Pmin_stab + dP_at_200mHz
+Pmax_active  = Pmax_disp − dP_at_200mHz          [Pmax_disp = PmaxPlant]
 ```
 
-**Note:** `dt` = OB30 cycle time in seconds. FB is called from OB30 (default 100 ms → `CycleTime_s = 0.1`). Pass as IN parameter to FC.
+**Dead band:** `|df| ≤ DeadBand_mHz / 1000` → `dP_droop = 0`. Hard cutout (not soft blend). Set `DeadBand_mHz = 0` for Art.117 fine-response test.
+
+**Frequency source:** `Frequency_Source_Sel = FALSE` → use `f_meas` (real AI); `TRUE` → use `Freq_Test_Override` (ISCE 4–20 mA test bench). Both SCADA-writable.
+
+**Trip logic:** `Trip_FreqFault` latches when `f > OFRT_Trip_Hz (51.5 Hz)` or `f < UFRT_Trip_Hz (47.5 Hz)`. When tripped: `P_final_kW = 0`. **Does NOT trip a breaker** — only zeros inverter setpoints. Caller (FB_PPC_Controller) also resets `Ramps_Pcmd := 0` so reconnect ramp-up starts from zero. Trip clears on `Reconnect_Enable` rising edge with f in normal band.
+
+**Reconnect timer:** `Reconnect_Timer_s` measures time from trip-clear to P reaching 95% Pmax_active — required for ISCE Test 7.
+
+**State retained:** `Trip_Latch : Bool`, `Reconnect_TON : TON`, `Reconnect_LastEnable : Bool`.
 
 ---
 
-### FC_PPC_PowerDistribution
+### FB_PPC_QCapability (step ⑤) — ANRE Ord 51/2019 Art. 147, 150, 152, 160, 163
 
-**Purpose:** Split `Ramps_Pcmd` equally among all online inverters and write `WSpt`.
+**Purpose:** Generates plant-level Q command after P-Q capability clamping and Q ramp limiting. Output `Q_final_kVAr` feeds step ⑦.
 
-**WSpt unit:** kW, direct integer value (scaling = 1).
+**P-Q capability (Test 8):** `PQ_Table[0..4]` of `UDT_PQ_CapPoint` stored in instance DB (configure from HMI). 5 tiers at P = 0/25/50/75/100% of `Pmax_kW`. Current Q limits computed by linear interpolation at the actual `P_actual_kW / Pmax_kW` operating point. `Q_setpoint_final` clamped to `[−Q_ind_max, +Q_cap_max]` regardless of control mode.
 
-**WMode (GriMng.WMod) ENUM:**
+**Q ramp (Test 6):** Rate-limited accumulator `Ramps_Qcmd` (static, moved from FC_PPC_ReactiveControl). Two independently-selectable speeds: `Q_Ramp_Rate_fast` / `Q_Ramp_Rate_slow`, switched via `Q_Ramp_Fast_Sel`. In FALLBACK: effective target forced to 0 → Q ramps down gracefully.
 
-| Value | Name | Description |
-|---|---|---|
-| 303 | Off | No active power control |
-| 1079 | WCtlCom | Remote W setpoint via Modbus |
+**Control modes (VArControl_Mode — separate from Plant_VArMode):**
+- `0` = Fixed Q: ramp `Q_setpoint_ext` → P-Q clamp → `Q_final_kVAr`
+- `1` = Voltage droop (Test 9): `Q = (dU_pu / (U_Droop_pct/100)) × QmaxPlant` → ramp → clamp
+- `2` = Off: `Q_final_kVAr = 0` (used when `Plant_VArMode = 2` PF in ReactiveControl)
 
-**Strategy — Proportional distribution by WAval:**
+**Voltage droop gain:** `dU_pu = (U_setpoint_ext − U_meas) / U_meas`. Gain scales with `QmaxPlant` (adaptive to actual inverter capacity). Example: U_Droop_pct=5%, dU=2.5% → Q = 50% of QmaxPlant.
 
-Each online inverter receives a share of `Ramps_Pcmd` proportional to its available active power (WAval). Since WAval pu values have the same WRtg denominator for same-model inverters, raw DInt values can be used directly for the ratio.
+**Zero-P reactive (Test 10):** Q dispatch is NOT gated on P > 0. Inverters with `OperMode=308` (maintained by FaultHandler) can source/sink Q even when `WSpt = 0`.
 
-```scl
-// sumWAval_raw = sum of raw WAval DInt for all online inverters (computed inline)
-sumWAval_raw := 0;
-FOR i := 0 TO 9 DO
-    IF inverter_is_online(i) THEN
-        sumWAval_raw := sumWAval_raw + PPC_Inverters[i].WAval;
-    END_IF;
-END_FOR;
-
-FOR i := 0 TO 9 DO
-    IF inverter_is_online(i) AND sumWAval_raw > 0 THEN
-        // share = WAval_i / ΣWAval_j  (dimensionless; WRtg cancels)
-        share := DINT_TO_REAL(PPC_Inverters[i].WAval) / DINT_TO_REAL(sumWAval_raw);
-        PPC_Inverters[i].WSpt  := REAL_TO_DINT(Ramps_Pcmd * share);
-        PPC_Inverters[i].WMode := 1079;  // WCtlCom
-    ELSE
-        PPC_Inverters[i].WSpt  := 0;
-        PPC_Inverters[i].WMode := 303;   // Off
-    END_IF;
-END_FOR;
-```
-
-**Limit check:** `Ramps_Pcmd` is already clamped to `Limits_PmaxPlant` by RampControl, so no individual inverter will receive more than its WAval in kW.
+**State retained:** `Ramps_Qcmd : Real`, `PQ_Table : Array[0..4] of UDT_PQ_CapPoint`.
 
 ---
 
-### FC_PPC_ReactiveControl
+### FC_PPC_PowerDistribution (step ⑥)
 
-**Purpose:** Distribute reactive power or power factor setpoint.
-
-**VArMode (GriMng.VArMod) ENUM — confirmed values:**
-
-| Value | Name | Description |
-|---|---|---|
-| 303 | Off | No reactive control (Q = 0) |
-| 1072 | VArCtlCom | Remote Q setpoint via Modbus (write VArSpt in kVAr) |
-| 1075 | PFCtlCom | Remote PF setpoint via Modbus (write PFSpt, scaled ×10000) |
-
-**VArSpt unit:** kVAr, direct integer value (scaling = 1).  
-**PFSpt scaling:** ×10000 (e.g. PF 0.950 → write 9500; PF 1.000 → write 10000).
-
-**Plant_VArMode values (plant-level selector, stored in DB39):**
-
-| Plant_VArMode | Inverter mode | Description |
-|---|---|---|
-| 0 | Off (303) | No reactive control |
-| 1 | VArCtlCom (1072) | Fixed Q setpoint |
-| 2 | PFCtlCom (1075) | Fixed PF setpoint |
-
-**Q distribution strategy:** Proportional to VArAval (same ratio approach as WAval for P). PF mode: same setpoint to all online inverters (PF is a ratio, uniform target is correct — Q distributes naturally proportional to P output).
-
-**Logic:**
-```scl
-// Pre-compute sumVArAval_raw for Q mode
-sumVArAval_raw := 0;
-FOR i := 0 TO 9 DO
-    IF inverter_is_online(i) THEN
-        sumVArAval_raw := sumVArAval_raw + PPC_Inverters[i].VArAval;
-    END_IF;
-END_FOR;
-
-FOR i := 0 TO 9 DO
-    IF inverter_is_online(i) THEN
-        CASE Plant_VArMode OF
-            0: // No Q control
-               PPC_Inverters[i].VArSpt  := 0;
-               PPC_Inverters[i].VArMode := 303;   // Off
-
-            1: // Q proportional to VArAval
-               IF sumVArAval_raw > 0 THEN
-                   share := DINT_TO_REAL(PPC_Inverters[i].VArAval)
-                            / DINT_TO_REAL(sumVArAval_raw);
-                   PPC_Inverters[i].VArSpt := REAL_TO_DINT(Targets_Q * share);
-               ELSE
-                   PPC_Inverters[i].VArSpt := 0;
-               END_IF;
-               PPC_Inverters[i].VArMode := 1072;  // VArCtlCom
-
-            2: // PF uniform — same target for all online inverters
-               PPC_Inverters[i].PFSpt   := REAL_TO_DINT(Targets_PF * 10000.0);
-               PPC_Inverters[i].VArMode := 1075;  // PFCtlCom
-        END_CASE;
-    ELSE
-        PPC_Inverters[i].VArSpt  := 0;
-        PPC_Inverters[i].PFSpt   := 0;
-        PPC_Inverters[i].VArMode := 303;
-    END_IF;
-END_FOR;
-```
+Distributes `P_final_kW` (from step ④ — droop-corrected) across available inverters proportionally by WAval. Writes `WSpt` and `WMode=1079` per inverter. Returns immediately in FALLBACK. Per-inverter WSpt clamp: `maxWSpt = WAval_i/10000 × WRtg_kW`.
 
 ---
 
-### FC_PPC_FaultHandler
+### FC_PPC_ReactiveControl (step ⑦)
 
-**Purpose:** Handle inverter-level and plant-level faults. Safe-state logic.
+Distributes `Q_final_kVAr` (from step ⑤ — already ramped and P-Q clamped) across available inverters proportionally by VArAval. **Q ramp has been removed** — it is now owned by FB_PPC_QCapability. Writes `VArSpt`, `PFSpt`, `VArMode` per inverter.
 
-**OperMode (InvOpMod) ENUM — confirmed values:**
-
-| Value | Name | Description |
-|---|---|---|
-| 308 | Operation | Normal operation (inverter running) |
-| 303 | Stop | Inverter stopped / safe state |
-
-**Triggers:**
-- `CommError` on any inverter → mark offline, `WSpt := 0`, `OperMode := 303`
-- `Error` on any inverter → same as CommError safe state
-- All inverters offline → `Ramps_Pcmd := 0`, clamp ramp output
-
-**FALLBACK mode behaviour:**
-- Confirmed: Fallback P = 0 (full stop via `OperMode := 303`)
-- Reason: writing `WSpt := 0` alone can trigger PwrOffReas "Low Power SetPoint"; `InvOpMod=303` issues a clean Stop command
-- Recovery: when mode returns to REMOTE_IEC, write `RemRdy=308` then `OperMode := 308` before resuming WSpt
-
-**Safe state per inverter:**
-```scl
-// Applied to faulted or FALLBACK inverters
-PPC_Inverters[i].OperMode := 303;  // Stop (InvOpMod)
-PPC_Inverters[i].WSpt     := 0;
-PPC_Inverters[i].VArSpt   := 0;
-PPC_Inverters[i].PFSpt    := 0;
-```
-
-- Do NOT write to healthy inverters in partial-fault scenarios — they continue operating
+**Modes (Plant_VArMode):**
+- `0` = Off: VArSpt=0, VArMode=303
+- `1` = Q control: distribute `Q_final_kVAr` by VArAval share; VArMode=1072
+- `2` = PF uniform: write `Targets_PF × 10000` to all available inverters; VArMode=1075
 
 ---
 
-## Main FB: `FB_PPC_Controller`
+### FC_PPC_FaultHandler (step ⑧)
 
-### Interface
-
-**Inverter array approach (decided):**  
-`PPC_Inverters[0..9]` is passed as `VAR_IN_OUT` to each FC. This keeps the FC signatures clean and avoids 10 individual IN_OUT parameters. `Inverter1..Inverter10` in DB39 are used for HMI/SCADA read visibility only — the PPC FCs write exclusively to the array.
-
-**INPUT:**
-| Variable | Type | Description |
-|---|---|---|
-| EN_PPC | Bool | Enable PPC |
-| IEC_Watchdog | Bool | Toggling heartbeat from upstream comms thread (edge = new telegram) |
-| CycleTime_s | Real | OB30 cycle time in seconds (default 0.1 for 100 ms) |
-| Cmd_P | Real | Active power target from upstream (kW) |
-| Cmd_Q | Real | Reactive power target from upstream (kVAr) |
-| Cmd_PF | Real | Power factor target from upstream (e.g. 0.95) |
-| Cmd_VArMode | Int | Reactive control mode from upstream (0=Off / 1=Q / 2=PF) |
-| LocalMode_Req | Bool | HMI LOCAL override request (TRUE = force LOCAL mode) |
-
-**OUTPUT:**
-| Variable | Type | Description |
-|---|---|---|
-| PPC_Active | Bool | TRUE when Plant_Mode = 1 (REMOTE_IEC) |
-| PPC_Fault | Bool | Any PPC-level fault active |
-| Mode_Out | Int | Current Plant_Mode (0/1/2) |
-
-**STATIC (retained in FB instance):**
-| Variable | Type | Description |
-|---|---|---|
-| Watchdog_TON | TON | Watchdog timer instance |
-| Watchdog_LastBit | Bool | Previous IEC_Watchdog state for rising-edge detection |
-| Watchdog_Timeout | Time | Configurable timeout, default T#30S |
-
-### Call sequence in FB body:
-
-```scl
-// Guard
-IF NOT EN_PPC THEN
-    // Safe state: all inverters stop via FaultHandler, then return
-    FC_PPC_FaultHandler(DB := PPC_Controller, ForceStop := TRUE);
-    PPC_Active := FALSE;
-    RETURN;
-END_IF;
-
-// Copy FB inputs → DB working fields (FCs read from DB)
-PPC_Controller.Targets_P      := Cmd_P;
-PPC_Controller.Targets_Q      := Cmd_Q;
-PPC_Controller.Targets_PF     := Cmd_PF;
-PPC_Controller.Plant_VArMode  := Cmd_VArMode;
-
-// ① Scan inverters — updates Plant_N_Online, Limits_PmaxPlant, Limits_QmaxPlant
-FC_PPC_InverterMonitor(DB := PPC_Controller);
-
-// ② Determine Plant_Mode from watchdog + LocalMode_Req
-FC_PPC_ModeManager(
-    Watchdog_Bit   := IEC_Watchdog,
-    LocalMode_Req  := LocalMode_Req,
-    WD_TON         := Watchdog_TON,
-    WD_Timeout     := Watchdog_Timeout,
-    DB             := PPC_Controller
-);
-
-// ③ Ramp Targets_P → Ramps_Pcmd (clamped to Limits_PmaxPlant)
-FC_PPC_RampControl(
-    dt := CycleTime_s,
-    DB := PPC_Controller
-);
-
-// ④ Distribute Ramps_Pcmd proportionally by WAval → write WSpt, WMode
-FC_PPC_PowerDistribution(DB := PPC_Controller);
-
-// ⑤ Distribute Q or PF proportionally by VArAval → write VArSpt/PFSpt, VArMode
-FC_PPC_ReactiveControl(DB := PPC_Controller);
-
-// ⑥ Override faulted/CommError inverters to safe state; apply FALLBACK logic
-FC_PPC_FaultHandler(DB := PPC_Controller, ForceStop := FALSE);
-
-// Write outputs
-Mode_Out   := PPC_Controller.Plant_Mode;
-PPC_Active := (PPC_Controller.Plant_Mode = 1);
-PPC_Fault  := PPC_Controller.AnyFault;  // Bool set by FaultHandler
-```
+Overrides setpoints for faulted / FALLBACK / disconnected inverters. Maintains `OperMode=308` for healthy inverters. Handles ErrClr one-shot. Resets `Ramps_Pcmd` and `QCap_IDB.Ramps_Qcmd` when all inverters are offline. `NOT ELECTRIC_OK` treated same as `PwrOffReas ≠ 0`: zero setpoints, `AnyFault=TRUE`, keep `OperMode=308` for instant recovery.
 
 ---
 
 ## Scaling Conventions
 
-Confirmed from SMA Modbus TCP/IP interface manual (unit ID 3):
+| Signal | Register format | PLC unit | Conversion |
+|---|---|---|---|
+| WAval, VArAval | S32, FIX4, pu | pu×10000 | ÷10000 × WRtg_kW → kW/kVAr |
+| Wactive, Qactive | S32, FIX4, pu | pu×10000 | ÷10000 × WRtg_kW → kW/kVAr |
+| WSpt | S32, FIX0, kW | kW | direct integer |
+| VArSpt | S32, FIX0, kVAr | kVAr | direct integer |
+| PFSpt | S32, FIX4 | — | PF × 10000 (0.950 → 9500) |
+| P_actual_kW | External meter AI | kW | 4–20 mA → kW scaling at AI block |
+| f_meas | Frequency transducer AI | Hz | 4–20 mA → Hz scaling |
+| U_meas | VT on MV bus | kV | Analog input |
 
-| Signal | UDT type | DB unit | Scale factor | Register unit | Notes |
-|---|---|---|---|---|---|
-| WAval | DInt | pu×10000 | ÷10000 × WRtg_kW | per-unit S32 | Convert to kW for distribution math |
-| VArAval | DInt | pu×10000 | ÷10000 × QRtg_kVAr | per-unit S32 | Same pattern as WAval |
-| Wactive | DInt | pu×10000 | ÷10000 × WRtg_kW | per-unit S32 | Measured output |
-| Qactive | DInt | pu×10000 | ÷10000 × QRtg_kVAr | per-unit S32 | Measured reactive output |
-| WSpt | DInt | kW | × 1 | kW direct | Write integer kW value |
-| VArSpt | DInt | kVAr | × 1 | kVAr direct | Write integer kVAr value |
-| PFSpt | DInt | PF×10000 | ÷10000 | dimensionless ×10000 | 0.950 → write 9500 |
+---
 
-**WRtg_kW** (register 184, kW): rated active power per inverter. Read once at startup and store in `PPC_Controller.WRtg_kW`. Assumed uniform across all inverters in the plant. If inverters have different ratings, move WRtg into the `Inverter_controller` UDT.
+## File Structure
 
-**ENUM reference summary (confirmed from Modbus map):**
+```
+PLC_1 [S7-1500]
+├── Program blocks
+│   ├── FB_PPC_Controller         [FB, SCL]  — main orchestrator
+│   ├── FC_PPC_InverterMonitor    [FC, SCL]  — ①
+│   ├── FC_PPC_ModeManager        [FC, SCL]  — ②
+│   ├── FC_PPC_RampControl        [FC, SCL]  — ③
+│   ├── FB_PPC_FreqResponse       [FB, SCL]  — ④ P-f droop (ANRE Art.114–120)
+│   ├── FB_PPC_QCapability        [FB, SCL]  — ⑤ P-Q capability + Q ramp (ANRE Art.147–163)
+│   ├── FC_PPC_PowerDistribution  [FC, SCL]  — ⑥
+│   ├── FC_PPC_ReactiveControl    [FC, SCL]  — ⑦
+│   ├── FC_PPC_FaultHandler       [FC, SCL]  — ⑧
+│   ├── FC_SkidElectricStatus     [FC, SCL]  — DI → ELECTRIC_OK per skid
+│   └── FC_PPC_SkidMapping        [FC, SCL]  — Modbus bridge
+├── PLC data types
+│   ├── Inverter_controller        [UDT]
+│   ├── Skid_Electric_Status       [UDT]
+│   └── UDT_PQ_CapPoint            [UDT]  — P-Q capability table entry
+└── Data blocks
+    ├── PPC_Controller             [DB39]  — plant-level config + working values
+    └── SKID_ELECTRIC              [DB]    — Skids: Array[0..9] of Skid_Electric_Status
+```
+
+---
+
+## SMA ENUM Reference
 
 | Register | ENUM value | Name | Meaning |
 |---|---|---|---|
 | InvOpMod (Holding 0) | 308 | Operation | Inverter running — write to start |
 | InvOpMod (Holding 0) | 303 | Stop/Off | Safe-state stop |
-| RemRdy (Holding 2) | 308 | Ready | Put inverter in remote-ready state |
+| RemRdy (Holding 2) | 308 | Ready | Remote-ready state |
 | RemRdy (Holding 2) | 303 | Standby | Remove remote-ready |
 | GriMng.WMod (Holding 6) | 303 | Off | No active power control |
 | GriMng.WMod (Holding 6) | 1079 | WCtlCom | Remote W setpoint via Modbus |
@@ -446,36 +325,23 @@ Confirmed from SMA Modbus TCP/IP interface manual (unit ID 3):
 | GriMng.VArMod (Holding 4) | 1072 | VArCtlCom | Remote Q setpoint via Modbus |
 | GriMng.VArMod (Holding 4) | 1075 | PFCtlCom | Remote PF setpoint via Modbus |
 
-**Start/Stop interlock sequence (mandatory):**
-- To **start**: write `RemRdy=308` first, then `InvOpMod=308`
-- To **stop**: write `InvOpMod=303` (optionally also `RemRdy=303`)
-- `WMod=1079` must be written **before** `WSpt` (mode first, then setpoint)
-- `VArMod=1072` or `1075` must be written **before** `VArSpt`/`PFSpt`
-
-**Comms layer separation:**  
-PPC FCs write only to UDT fields (e.g. `OperMode`, `WMode`, `WSpt`). A dedicated Modbus comms block (outside the PPC FB) maps UDT fields → actual holding register writes (FC16) and input register reads (FC04). The PPC control logic has no awareness of register addresses.
-
-**WSpt/VArSpt/PFSpt readback:** Input registers 108/112/114 are the inverter's echo of the currently active setpoint (read-only). The actual write addresses are in holding registers handled by the comms block.
+**Start/Stop interlock:** write `RemRdy=308` then `InvOpMod=308` to start; `InvOpMod=303` to stop.
 
 ---
 
-## File Structure (TIA Portal project)
+## ANRE Test Compliance Map
 
-```
-PLC_1 [S7-1500]
-├── Program blocks
-│   ├── FB_PPC_Controller      [FB, SCL]  — main controller
-│   ├── FC_PPC_InverterMonitor [FC, SCL]  — ①
-│   ├── FC_PPC_ModeManager     [FC, SCL]  — ②
-│   ├── FC_PPC_RampControl     [FC, SCL]  — ③
-│   ├── FC_PPC_PowerDistribution[FC, SCL] — ④
-│   ├── FC_PPC_ReactiveControl [FC, SCL]  — ⑤
-│   └── FC_PPC_FaultHandler    [FC, SCL]  — ⑥
-├── PLC data types
-│   └── Inverter_controller    [UDT]
-└── Data blocks
-    └── PPC_Controller         [DB39]
-```
+| ISCE Test | Article | Block | Configurable parameter |
+|---|---|---|---|
+| Test 1/2/3 (P-f over/under-freq droop) | Art. 114–120 | FB_PPC_FreqResponse | Droop_pct, DeadBand_mHz |
+| Test 3 (fine response Art.117) | Art. 117 | FB_PPC_FreqResponse | DeadBand_mHz = 0 via SCADA |
+| Test 4 (full sweep + trip + reconnect) | Art. 118–120 | FB_PPC_FreqResponse | OFRT_Trip_Hz, Reconnect_Enable |
+| Test 6 (Q ramp rates) | — | FB_PPC_QCapability | Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel |
+| Test 7 (reconnect timing) | Art. 126–131 | FB_PPC_FreqResponse | Reconnect_Timer_s (read from SCADA) |
+| Test 8 (P-Q diagram, 5 tiers) | Art. 147, 152 | FB_PPC_QCapability | PQ_Table[0..4] in instance DB |
+| Test 9 (voltage droop Q control) | Art. 160, 163 | FB_PPC_QCapability | VArControl_Mode=1, U_Droop_pct |
+| Test 10 (Q at P=0, ≥30 min) | Art. 150, 152 | FC_PPC_ReactiveControl | No gate on P>0; OperMode=308 maintained |
+| Test 12 (SCADA data exchange) | Art. 164–165 | DB39 fields | All diagnostic outputs in DB39 |
 
 ---
 
@@ -483,30 +349,14 @@ PLC_1 [S7-1500]
 
 | # | Question | Status |
 |---|---|---|
-| 1 | SMA scaling — WAval/WSpt units | **RESOLVED** — WAval/VArAval = pu×10000 (FIX4); WSpt = kW direct (FIX0); VArSpt = kVAr direct (FIX0); PFSpt = PF×10000 (FIX4) |
-| 2 | OperMode (InvOpMod) ENUM values | **RESOLVED** — 308 = Operation, 303 = Stop; RemRdy: 308 = Ready, 303 = Standby |
-| 3 | WMode (GriMng.WMod) values | **RESOLVED** — 303 = Off, 1079 = WCtlCom |
-| 4 | VArMode (GriMng.VArMod) values | **RESOLVED** — 303 = Off, 1072 = VArCtlCom, 1075 = PFCtlCom |
-| 5 | SCADA/IEC interface — targets and mode source | **RESOLVED** — Targets_P/Q/PF and VArMode are FB input parameters (Cmd_P, Cmd_Q, Cmd_PF, Cmd_VArMode); upstream comms thread writes them to the FB call in OB30 |
-| 6 | Distribution algorithm | **RESOLVED** — proportional to WAval (P) and VArAval (Q); PF mode uniform (same setpoint to all online inverters) |
-| 7 | Fallback P level | **RESOLVED** — Fallback = 0 via InvOpMod=303 (Stop) |
-| 8 | OB cycle time | **RESOLVED** — OB30, default 100 ms; CycleTime_s = 0.1 |
-| 9 | Array vs named inverters | **RESOLVED** — same physical inverters; PPC FCs write to array only; Inverter1..10 are HMI mirrors |
-| 10 | WRtg_kW availability | **RESOLVED** — all inverters same model; WRtg_kW is a plant constant in DB39 |
-
----
-
-## Implementation Order
-
-| Step | Block | Status | Notes |
-|---|---|---|---|
-| 1 | UDT `Inverter_controller` | Done (imported) | |
-| 2 | DB39 `PPC_Controller` | Done (imported) | **Add `WRtg_kW: Real` field** |
-| 3 | `FC_PPC_InverterMonitor` | To do | Uses WAval pu→kW conversion |
-| 4 | `FC_PPC_ModeManager` | To do | TON watchdog, OB30 tick |
-| 5 | `FC_PPC_RampControl` | To do | dt = 0.1 s |
-| 6 | `FC_PPC_PowerDistribution` | To do | WSpt in kW, WMode=1079 |
-| 7 | `FC_PPC_ReactiveControl` | To do | VArSpt kVAr direct, PFSpt ×10000 |
-| 8 | `FC_PPC_FaultHandler` | To do | OperMode=381 for stop |
-| 9 | `FB_PPC_Controller` | To do | Array VAR_IN_OUT |
-| 10 | Integration test / simulation | To do | Resolve open questions 5, 10 first |
+| 1 | SMA WAval/WSpt scaling | **RESOLVED** — WAval/VArAval FIX4; WSpt FIX0; PFSpt FIX4×10000 |
+| 2 | OperMode ENUM | **RESOLVED** — 308=Operation, 303=Stop |
+| 3 | WMode ENUM | **RESOLVED** — 303=Off, 1079=WCtlCom |
+| 4 | VArMode ENUM | **RESOLVED** — 303=Off, 1072=VArCtlCom, 1075=PFCtlCom |
+| 5 | Distribution algorithm | **RESOLVED** — proportional WAval (P) / VArAval (Q) |
+| 6 | Fallback P level | **RESOLVED** — 0 via InvOpMod=303 |
+| 7 | SKID_ELECTRIC polarity | **PENDING** — verify auxiliary contact wiring (closed=TRUE assumed) |
+| 8 | PQ_Table values | **PENDING** — enter from inverter datasheets before ISCE Test 8 |
+| 9 | P_actual_kW source | **PENDING** — wire from POD meter AI at commissioning |
+| 10 | f_meas AI scaling | **PENDING** — configure 4–20 mA → 47.5–52.0 Hz at AI block |
+| 11 | Q_Ramp_Rate_fast/slow values | **PENDING** — enter grid code requirements before ISCE Test 6 |
