@@ -17,13 +17,13 @@ NON_RETAIN
       START_CONTROLLER { S7_SetPoint := 'True'} : Bool;
       P_RampUp : Real;   // kWps
       P_RampDown : Real;   // kWps
-      Q_RampUp : Real;   // kVArps 
-      Q_RampDown : Real;
+      Q_RampUp : Real;   // kVArps — legacy; superseded by Q_Ramp_Rate_fast/slow
+      Q_RampDown : Real;   // legacy; superseded by Q_Ramp_Rate_fast/slow
       PF_Ramp : Real;   // ps
       Plant_P_meas : Real;   // kW
       Plant_Q_meas : Real;   // kVAr
       Plant_N_Online : Int;
-      Plant_Mode : Int;   // LOCAL / REMOTE_IEC / FALLBACK
+      Plant_Mode : Int;   // 0=LOCAL / 1=REMOTE_IEC / 2=FALLBACK
       Targets_P : Real;   // kW
       Targets_Q : Real;   // kVAr
       Targets_PF : Real;
@@ -35,10 +35,43 @@ NON_RETAIN
       AnyFault : Bool;
       AnyDerating : Bool;
       FaultMask : Word;
+
+      // ── Frequency response parameters (ANRE Ord 51/2019 Art. 114-120) ─────────
+      // All SCADA-writable; change without code reload.
+      f_nom : Real := 50.0;        // Hz, nominal grid frequency
+      Pn_MW : Real := 48.0;        // MW, plant nominal rated power (CEF Tandarei 10 × SMA SC)
+      Droop_pct : Real := 8.0;     // %, droop setting (ISCE campaign: 8.0 and 10.0)
+      DeadBand_mHz : Real := 200.0; // mHz, dead band (set 0 for Art.117 fine-response sub-test)
+      Pmin_stab : Real := 0.0;     // kW, minimum stable power
+      OFRT_Trip_Hz : Real := 51.5; // Hz, over-frequency trip threshold (Art. 118-120)
+      UFRT_Trip_Hz : Real := 47.5; // Hz, under-frequency trip threshold (Art. 118-120)
+      Reconnect_Enable : Bool;     // Rising edge clears freq trip latch (operator/SCADA button)
+
+      // ── Frequency response diagnostics (written by FB, SCADA-readable) ────────
+      dP_droop : Real;             // kW, droop correction applied this cycle (ISCE acquisition)
+      FreqResp_Pmin : Real;        // kW, dynamic Pmin_active = Pmin_stab + dP_at_200mHz
+      FreqResp_Pmax : Real;        // kW, dynamic Pmax_active = PmaxPlant - dP_at_200mHz
+      Trip_FreqFault : Bool;       // TRUE: freq outside UFRT/OFRT, inverter setpoints zeroed
+      Reconnecting : Bool;         // TRUE: recovering from trip, ramp-up in progress
+      Reconnect_Timer_s : Real;    // s, elapsed reconnect time from trip-clear (ISCE Test 7)
+
+      // ── Q capability / voltage control parameters (ANRE Art. 147, 160, 163) ───
+      // All SCADA-writable.
+      VArControl_Mode : Int;       // 0=fixed Q, 1=U droop, 2=off  (Q source inside QCapability)
+      U_setpoint_ext : Real;       // kV, MV busbar voltage setpoint for U-droop mode
+      U_Droop_pct : Real := 5.0;   // %, voltage droop (default 5%)
+      Q_Ramp_Rate_fast : Real;     // kVAr/s, fast Q ramp rate (ISCE Test 6)
+      Q_Ramp_Rate_slow : Real;     // kVAr/s, slow Q ramp rate (ISCE Test 6)
+      Q_Ramp_Fast_Sel : Bool;      // FALSE=slow ramp, TRUE=fast ramp
+
+      // ── Q capability diagnostics (written by FB, SCADA-readable) ─────────────
+      Q_max_inductive : Real;      // kVAr, inductive capability at current P (ISCE Test 8)
+      Q_max_capacitive : Real;     // kVAr, capacitive capability at current P (ISCE Test 8)
+      Q_limited : Bool;            // TRUE: Q command was clamped by P-Q envelope
+
    END_VAR
 
 
 BEGIN
 
 END_DATA_BLOCK
-
