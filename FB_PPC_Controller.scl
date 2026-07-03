@@ -3,36 +3,72 @@
 // -----------------------------------------------------------------------------
 // PURPOSE:
 //   Orchestrates the entire PPC control loop. Called from OB30 (cyclic interrupt,
-//   default 100 ms). Calls six FCs in a fixed order; each FC feeds the next.
+//   default 100 ms). Calls eight FCs/FBs in a fixed order; each feeds the next.
 //
 // CALL ORDER AND DATA FLOW:
 //   ①  FC_PPC_InverterMonitor    →  N_Online, PmaxPlant, QmaxPlant, Inverters[i].Available
 //   ②  FC_PPC_ModeManager        →  Plant_Mode  (LOCAL / REMOTE_IEC / FALLBACK)
-//   ③  FC_PPC_RampControl        →  Ramps_Pcmd  (rate-limited P command in kW)
-//   ④  FC_PPC_PowerDistribution  →  WSpt, WMode per inverter
-//   ⑤  FC_PPC_ReactiveControl    →  Ramps_Qcmd, VArSpt / PFSpt / VArMode per inverter
-//   ⑥  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
+//   ③  FC_PPC_RampControl        →  Ramps_Pcmd  (rate-limited P command from Cmd_P)
+//   ④  FB_PPC_FreqResponse       →  P_final_kW  (droop correction added POST-ramp;
+//                                     if Trip_FreqFault: P_final_kW = 0 AND Ramps_Pcmd reset)
+//   ⑤  FB_PPC_QCapability        →  Q_final_kVAr  (P-Q capability clamp + Q ramp;
+//                                     Q_ramp moved here from FC_PPC_ReactiveControl)
+//   ⑥  FC_PPC_PowerDistribution  →  WSpt, WMode per inverter (receives P_final_kW)
+//   ⑦  FC_PPC_ReactiveControl    →  VArSpt / PFSpt / VArMode per inverter
+//                                     (receives Q_final_kVAr; Q ramp stripped out)
+//   ⑧  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
 //
 // PRECONDITION — caller (OB30) must run BEFORE this FB, once per skid (10x):
 //   "FC_SkidElectricStatus"(Skid := "SKID_ELECTRIC".Skids[i]);
 //   so that SKID_ELECTRIC.Skids[i].ELECTRIC_OK is fresh when step ① reads it.
 //
+// FREQUENCY DROOP ARCHITECTURE (Art. 114–120, ANRE Ord 51/2019):
+//   Droop correction is added AFTER the P ramp (step ③→④) so frequency events
+//   bypass rate limiting — primary frequency response is never ramp-capped.
+//   RampControl only limits normal AGC setpoint changes. When Trip_FreqFault:
+//   P_final_kW = 0 AND Ramps_Pcmd is reset so reconnect ramp-up starts from zero.
+//
+// Q RAMP RELOCATION:
+//   Ramps_Qcmd is no longer a static variable in this FB.
+//   It lives inside FreqResp_IDB / QCap_IDB.Ramps_Qcmd (FB_PPC_QCapability static).
+//   Reset it via QCap_IDB.Ramps_Qcmd := 0.0 when needed (EN_PPC=FALSE, FALLBACK→REMOTE).
+//
 // DB39 FIELDS REQUIRED (user must add if not present):
-//   Q_RampUp     : REAL    — Q ramp rate up in kVAr/s
-//   Q_RampDown   : REAL    — Q ramp rate down in kVAr/s
-//   Ramps_Qcmd   : REAL    — mirrored ramped Q command for HMI trending
-//   AnyDerating  : BOOL    — mirrored derating alarm flag
-//   FaultMask    : WORD    — mirrored per-inverter fault bitmap (bit i = inverter i)
+//   // FreqResponse parameters (all SCADA-writable):
+//   f_nom          : REAL  := 50.0    — nominal frequency
+//   Pn_MW          : REAL  := 48.0    — plant nominal power in MW
+//   Droop_pct      : REAL  := 8.0     — droop % (ISCE tests at 8.0 and 10.0)
+//   DeadBand_mHz   : REAL  := 200.0   — dead band in mHz (0 for Art.117 sub-test)
+//   Pmin_stab      : REAL  := 0.0     — minimum stable power in kW
+//   OFRT_Trip_Hz   : REAL  := 51.5    — over-frequency trip threshold Hz
+//   UFRT_Trip_Hz   : REAL  := 47.5    — under-frequency trip threshold Hz
+//   Reconnect_Enable : BOOL           — rising edge clears freq trip latch
+//   // FreqResponse diagnostics (SCADA-readable):
+//   dP_droop        : REAL — droop correction term kW (ISCE acquisition)
+//   FreqResp_Pmin   : REAL — dynamic Pmin_active kW
+//   FreqResp_Pmax   : REAL — dynamic Pmax_active kW
+//   Trip_FreqFault  : BOOL — frequency trip active
+//   Reconnecting    : BOOL — recovering from trip
+//   Reconnect_Timer_s : REAL — reconnect duration seconds (ISCE Test 7)
+//   // QCapability parameters (all SCADA-writable):
+//   VArControl_Mode  : INT  := 0     — 0=fixed Q, 1=U droop, 2=off
+//   U_setpoint_ext   : REAL          — kV, voltage setpoint for U droop mode
+//   U_Droop_pct      : REAL := 5.0   — % voltage droop
+//   Q_Ramp_Rate_fast : REAL          — kVAr/s fast ramp (ISCE Test 6)
+//   Q_Ramp_Rate_slow : REAL          — kVAr/s slow ramp (ISCE Test 6)
+//   Q_Ramp_Fast_Sel  : BOOL          — FALSE=slow, TRUE=fast
+//   // QCapability diagnostics (SCADA-readable):
+//   Q_max_inductive  : REAL — current Q inductive limit kVAr (ISCE Test 8)
+//   Q_max_capacitive : REAL — current Q capacitive limit kVAr (ISCE Test 8)
+//   Q_limited        : BOOL — Q was clamped by P-Q capability envelope
 //
 // LOCAL MODE:
 //   When Plant_Mode = 0 (LOCAL), the OB30 caller is responsible for supplying
 //   Cmd_P and Cmd_Q from the HMI DB rather than from the SCADA comms thread.
-//   The PLC logic itself does not switch the setpoint source.
 //
 // FALLBACK RECOVERY (S4 fix):
-//   When Plant_Mode transitions from FALLBACK (2) to REMOTE_IEC (1), both
-//   Ramps_Pcmd and Ramps_Qcmd are forced to 0. This ensures a clean ramp-up
-//   from zero regardless of whether any inverters stayed online during FALLBACK.
+//   When Plant_Mode transitions from FALLBACK (2) to REMOTE_IEC (1), Ramps_Pcmd
+//   and QCap_IDB.Ramps_Qcmd are forced to 0 for a clean ramp-up from zero.
 //
 // CALLED FROM: OB30 (cyclic, 100 ms)
 // INSTANCE DB:  assign one DB when placing the FB call in OB30
@@ -60,18 +96,40 @@ VAR_INPUT
     // In LOCAL mode: supplied by OB30 caller from HMI DB.
     Cmd_P : REAL;
 
-    // Reactive power target in kVAr. Used when Cmd_VArMode = 1.
+    // Reactive power target in kVAr. Used when Cmd_VArMode = 1 and VArControl_Mode = 0.
     // In LOCAL mode: supplied by OB30 caller from HMI DB.
     Cmd_Q : REAL;
 
     // Power factor target (e.g. 0.95, 1.00). Used when Cmd_VArMode = 2.
     Cmd_PF : REAL;
 
-    // Reactive control mode: 0 = Off, 1 = Q setpoint, 2 = PF setpoint.
+    // Reactive control mode: 0 = Off, 1 = Q dispatch, 2 = PF setpoint.
+    // Controls FC_PPC_ReactiveControl. Q source (fixed vs U-droop) is set via
+    // "PPC_Controller".VArControl_Mode which feeds FB_PPC_QCapability.
     Cmd_VArMode : INT;
 
     // TRUE when HMI LOCAL/REMOTE selector is in LOCAL.
     LocalMode_Req : BOOL;
+
+    // Hz, grid-measured frequency from analog input.
+    // Active frequency source when Frequency_Source_Sel = FALSE.
+    f_meas : REAL;
+
+    // Hz, ISCE test bench frequency (4–20 mA AI, mapped 47.5–52.0 Hz).
+    // Active frequency source when Frequency_Source_Sel = TRUE.
+    Freq_Test_Override : REAL;
+
+    // FALSE = use f_meas (normal operation); TRUE = use Freq_Test_Override (ISCE window).
+    // Must be SCADA-writable so commissioning team can switch without a code change.
+    Frequency_Source_Sel : BOOL;
+
+    // kV, MV busbar measured voltage from grid meter or VT on MV bus.
+    // Used by FB_PPC_QCapability in voltage droop mode (VArControl_Mode = 1).
+    U_meas : REAL;
+
+    // kW, plant actual active power from grid meter (measurement, not setpoint).
+    // Used by FB_PPC_QCapability to index into the P-Q capability table.
+    P_actual_kW : REAL;
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +159,8 @@ VAR
 
     Plant_Mode  : INT;
     Ramps_Pcmd  : REAL;
-    Ramps_Qcmd  : REAL;
+    // NOTE: Ramps_Qcmd is NO LONGER here — it lives in QCap_IDB.Ramps_Qcmd.
+    //       Reset it via QCap_IDB.Ramps_Qcmd := 0.0 when a clean restart is needed.
 
     // Previous Plant_Mode — used to detect FALLBACK→REMOTE_IEC transition (S4).
     PrevMode : INT;
@@ -111,6 +170,10 @@ VAR
 
     // Previous Enabled state per inverter — for ErrClr re-send on re-enable (M6).
     PrevEnabled_Arr : Array[0..9] of BOOL;
+
+    // Multi-instance FBs — instance data stored within this FB's own IDB.
+    FreqResp_IDB : FB_PPC_FreqResponse;   // step ④: P-f droop, OFRT/UFRT trip
+    QCap_IDB     : FB_PPC_QCapability;    // step ⑤: P-Q capability + Q ramp
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +187,8 @@ VAR_TEMP
     QmaxPlant       : REAL;
     AnyFault_Tmp    : BOOL;
     FaultMask       : WORD;
+    P_final_kW      : REAL;   // kW, after droop correction (FreqResp output → PowerDist input)
+    Q_final_kVAr    : REAL;   // kVAr, after P-Q clamp (QCap output → ReactiveCtrl input)
 END_VAR
 
 
@@ -138,18 +203,19 @@ BEGIN
             ForceStop    := TRUE,
             Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
             SkidElectric := "SKID_ELECTRIC".Skids,
-            Ramps_Pcmd  := #Ramps_Pcmd,
-            Ramps_Qcmd  := #Ramps_Qcmd,
-            PrevError   := #PrevError_Arr,
-            PrevEnabled := #PrevEnabled_Arr,
-            AnyFault    => #AnyFault_Tmp,
-            AnyDerating => #AnyDerating,
-            FaultMask   => #FaultMask
+            Ramps_Pcmd   := #Ramps_Pcmd,
+            Ramps_Qcmd   := #QCap_IDB.Ramps_Qcmd,
+            PrevError    := #PrevError_Arr,
+            PrevEnabled  := #PrevEnabled_Arr,
+            AnyFault     => #AnyFault_Tmp,
+            AnyDerating  => #AnyDerating,
+            FaultMask    => #FaultMask
         );
-        #Plant_Mode := 0;
-        #Ramps_Pcmd := 0.0;
-        #Ramps_Qcmd := 0.0;
-        #PrevMode   := 0;
+        #Plant_Mode             := 0;
+        #Ramps_Pcmd             := 0.0;
+        #QCap_IDB.Ramps_Qcmd   := 0.0;   // Q ramp reset (lives in QCap multi-instance IDB)
+        #FreqResp_IDB.Trip_Latch := FALSE;  // Clear freq trip on disable (clean re-enable)
+        #PrevMode               := 0;
         // Write outputs
         #PPC_Active  := FALSE;
         #PPC_Fault   := #AnyFault_Tmp;
@@ -207,17 +273,15 @@ BEGIN
     "PPC_Controller".Plant_Mode := #Plant_Mode;
 
     // ── S4: Reset ramps on FALLBACK → REMOTE_IEC transition ──────────────────
-    // Force both ramps to 0 whenever comms recover from FALLBACK, ensuring
-    // a clean ramp-up from zero regardless of inverter state during FALLBACK.
     IF (#PrevMode = 2) AND (#Plant_Mode <> 2) THEN
-        #Ramps_Pcmd := 0.0;
-        #Ramps_Qcmd := 0.0;
+        #Ramps_Pcmd           := 0.0;
+        #QCap_IDB.Ramps_Qcmd := 0.0;
     END_IF;
     #PrevMode := #Plant_Mode;
 
 
     // =========================================================================
-    // ③  FC_PPC_RampControl
+    // ③  FC_PPC_RampControl  (limits rate of change of AGC Cmd_P only)
     // =========================================================================
     "FC_PPC_RampControl"(
         Targets_P   := #Cmd_P,
@@ -232,10 +296,78 @@ BEGIN
 
 
     // =========================================================================
-    // ④  FC_PPC_PowerDistribution
+    // ④  FB_PPC_FreqResponse  (P-f droop — adds correction POST-ramp)
+    // =========================================================================
+    // Droop correction is applied after RampControl so frequency events are
+    // immediate — primary frequency response is never rate-limited by ramp.
+    #FreqResp_IDB(
+        f_meas               := #f_meas,
+        Freq_Test_Override   := #Freq_Test_Override,
+        Frequency_Source_Sel := #Frequency_Source_Sel,
+        f_nom                := "PPC_Controller".f_nom,
+        Pn_MW                := "PPC_Controller".Pn_MW,
+        Droop_pct            := "PPC_Controller".Droop_pct,
+        DeadBand_mHz         := "PPC_Controller".DeadBand_mHz,
+        P_setpoint_ext       := #Ramps_Pcmd,
+        Pmin_stab            := "PPC_Controller".Pmin_stab,
+        Pmax_disp            := #PmaxPlant,
+        OFRT_Trip_Hz         := "PPC_Controller".OFRT_Trip_Hz,
+        UFRT_Trip_Hz         := "PPC_Controller".UFRT_Trip_Hz,
+        Reconnect_Enable     := "PPC_Controller".Reconnect_Enable,
+        Plant_Mode           := #Plant_Mode
+    );
+    #P_final_kW := #FreqResp_IDB.P_setpoint_final;
+
+    // When trip active: also reset P ramp accumulator so recovery starts from 0.
+    // Next cycle RampControl will ramp Ramps_Pcmd up from 0 toward Cmd_P.
+    IF #FreqResp_IDB.Trip_FreqFault THEN
+        #Ramps_Pcmd := 0.0;
+    END_IF;
+
+    // Mirror FreqResponse diagnostics to DB (ISCE acquisition + HMI)
+    "PPC_Controller".dP_droop          := #FreqResp_IDB.dP_droop;
+    "PPC_Controller".FreqResp_Pmin     := #FreqResp_IDB.Pmin_active;
+    "PPC_Controller".FreqResp_Pmax     := #FreqResp_IDB.Pmax_active;
+    "PPC_Controller".Trip_FreqFault    := #FreqResp_IDB.Trip_FreqFault;
+    "PPC_Controller".Reconnecting      := #FreqResp_IDB.Reconnecting;
+    "PPC_Controller".Reconnect_Timer_s := #FreqResp_IDB.Reconnect_Timer_s;
+
+
+    // =========================================================================
+    // ⑤  FB_PPC_QCapability  (P-Q envelope + Q ramp)
+    // =========================================================================
+    // Control_Mode (0=fixed Q, 1=U droop, 2=off) is separate from Plant_VArMode
+    // (0=Off, 1=Q dispatch, 2=PF). A caller can set Plant_VArMode=1 and choose
+    // the Q source by setting "PPC_Controller".VArControl_Mode = 0 or 1.
+    #QCap_IDB(
+        P_actual_kW      := #P_actual_kW,
+        Pmax_kW          := "PPC_Controller".Pn_MW * 1000.0,
+        Q_setpoint_ext   := #Cmd_Q,
+        U_setpoint_ext   := "PPC_Controller".U_setpoint_ext,
+        U_meas           := #U_meas,
+        Control_Mode     := "PPC_Controller".VArControl_Mode,
+        U_Droop_pct      := "PPC_Controller".U_Droop_pct,
+        Q_Ramp_Rate_fast := "PPC_Controller".Q_Ramp_Rate_fast,
+        Q_Ramp_Rate_slow := "PPC_Controller".Q_Ramp_Rate_slow,
+        Q_Ramp_Fast_Sel  := "PPC_Controller".Q_Ramp_Fast_Sel,
+        QmaxPlant        := #QmaxPlant,
+        CycleTime_s      := #CycleTime_s,
+        Plant_Mode       := #Plant_Mode
+    );
+    #Q_final_kVAr := #QCap_IDB.Q_setpoint_final;
+
+    // Mirror QCapability diagnostics to DB (ISCE Test 8/9 acquisition + HMI)
+    "PPC_Controller".Q_max_inductive  := #QCap_IDB.Q_max_inductive;
+    "PPC_Controller".Q_max_capacitive := #QCap_IDB.Q_max_capacitive;
+    "PPC_Controller".Q_limited        := #QCap_IDB.Q_limited;
+    "PPC_Controller".Ramps_Qcmd       := #QCap_IDB.Ramps_Qcmd;
+
+
+    // =========================================================================
+    // ⑥  FC_PPC_PowerDistribution  (receives P_final_kW after droop correction)
     // =========================================================================
     "FC_PPC_PowerDistribution"(
-        Ramps_Pcmd := #Ramps_Pcmd,
+        Ramps_Pcmd := #P_final_kW,   // droop-corrected P command (not raw Ramps_Pcmd)
         Plant_Mode := #Plant_Mode,
         WRtg_kW    := "PPC_Controller".WRtg_kW,
         Inverters  := "PPC_Controller".Inverters.PPC_Inverters
@@ -243,38 +375,32 @@ BEGIN
 
 
     // =========================================================================
-    // ⑤  FC_PPC_ReactiveControl
+    // ⑦  FC_PPC_ReactiveControl  (receives Q_final_kVAr — Q ramp already done)
     // =========================================================================
     "FC_PPC_ReactiveControl"(
         Plant_VArMode := #Cmd_VArMode,
-        Targets_Q     := #Cmd_Q,
+        Q_cmd_kVAr    := #Q_final_kVAr,   // ramped + capability-clamped Q from QCapability
         Targets_PF    := #Cmd_PF,
         Plant_Mode    := #Plant_Mode,
-        Q_RampUp      := "PPC_Controller".Q_RampUp,
-        Q_RampDown    := "PPC_Controller".Q_RampDown,
-        CycleTime_s   := #CycleTime_s,
-        QmaxPlant     := #QmaxPlant,
-        Inverters     := "PPC_Controller".Inverters.PPC_Inverters,
-        Ramps_Qcmd    := #Ramps_Qcmd
+        Inverters     := "PPC_Controller".Inverters.PPC_Inverters
     );
-    "PPC_Controller".Ramps_Qcmd := #Ramps_Qcmd;
 
 
     // =========================================================================
-    // ⑥  FC_PPC_FaultHandler  (always last)
+    // ⑧  FC_PPC_FaultHandler  (always last)
     // =========================================================================
     "FC_PPC_FaultHandler"(
         Plant_Mode   := #Plant_Mode,
         ForceStop    := FALSE,
         Inverters    := "PPC_Controller".Inverters.PPC_Inverters,
         SkidElectric := "SKID_ELECTRIC".Skids,
-        Ramps_Pcmd  := #Ramps_Pcmd,
-        Ramps_Qcmd  := #Ramps_Qcmd,
-        PrevError   := #PrevError_Arr,
-        PrevEnabled := #PrevEnabled_Arr,
-        AnyFault    => #AnyFault_Tmp,
-        AnyDerating => #AnyDerating,
-        FaultMask   => #FaultMask
+        Ramps_Pcmd   := #Ramps_Pcmd,
+        Ramps_Qcmd   := #QCap_IDB.Ramps_Qcmd,
+        PrevError    := #PrevError_Arr,
+        PrevEnabled  := #PrevEnabled_Arr,
+        AnyFault     => #AnyFault_Tmp,
+        AnyDerating  => #AnyDerating,
+        FaultMask    => #FaultMask
     );
     "PPC_Controller".AnyFault    := #AnyFault_Tmp;
     "PPC_Controller".AnyDerating := #AnyDerating;

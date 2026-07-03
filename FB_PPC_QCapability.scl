@@ -1,0 +1,247 @@
+// =============================================================================
+// FB_PPC_QCapability — P-Q capability enforcement and reactive power generation
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Generates the plant-level reactive power command (Q_setpoint_final) by:
+//     1. Computing Q from selected control mode (fixed-Q or voltage droop)
+//     2. Applying Q ramp rate limiting (moved here from FC_PPC_ReactiveControl)
+//     3. Clamping to the P-Q capability envelope (linear interpolation from table)
+//
+//   Sits between the upstream Q command (fixed or U-droop) and the per-inverter
+//   dispatch (FC_PPC_ReactiveControl). Output Q_setpoint_final is already ramped
+//   and capability-clamped; ReactiveControl only distributes it proportionally.
+//
+// P-Q CAPABILITY TABLE (Art. 147, 152 — ISCE Test 8):
+//   PQ_Table[0..4] — 5 operating tiers at P_pct = 0 / 25 / 50 / 75 / 100% of Pmax.
+//   Q_ind_max (inductive/lagging/underexcited) and Q_cap_max (capacitive/leading/
+//   overexcited) in kVAr at each tier. Runtime Q limit = linear interpolation between
+//   the two bracketing rows for current P_actual_kW / Pmax_kW.
+//   CONFIGURE table values from HMI/SCADA via the instance DB before commissioning.
+//   Default values are set to 20 000 kVAr (non-limiting) so the system is functional
+//   before commissioning data is entered. Replace with plant-specific capability values
+//   from inverter datasheets and ANRE category D grid code requirements.
+//
+// Q RAMP RATE LIMITING (ISCE Test 6):
+//   Ramps_Qcmd (static) accumulates Q at a limited rate (kVAr/s).
+//   Two independently-selectable speeds: Q_Ramp_Rate_fast / Q_Ramp_Rate_slow.
+//   Same ramp logic as FC_PPC_RampControl (P ramp) — symmetric for Q since Q can be
+//   negative. SCADA switches Q_Ramp_Fast_Sel to test each speed independently.
+//   In FALLBACK: effective target forced to 0 — Q descends gracefully, not abruptly.
+//   Q ramp was previously in FC_PPC_ReactiveControl; moved here for separation of:
+//     - Plant-level Q generation (this FB) vs per-inverter Q dispatch (ReactiveControl).
+//
+// CONTROL MODES (Control_Mode — separate from Plant_VArMode in ReactiveControl):
+//   0 = Fixed Q : Q_setpoint_ext → ramp → P-Q clamp → Q_setpoint_final
+//   1 = Voltage droop : compute Q from (U_setpoint_ext − U_meas) × gain → ramp → clamp
+//   2 = Off : Q_setpoint_final = 0 (used when Plant_VArMode = 2 PF in ReactiveControl)
+//
+// VOLTAGE DROOP GAIN (Art. 160, 163 — ISCE Test 9):
+//   dU_pu = (U_setpoint_ext − U_meas) / U_meas   [fractional per-unit voltage error]
+//   Q_command = (dU_pu / (U_Droop_pct / 100)) × QmaxPlant
+//   Gain is adaptive — scales with actual available reactive capacity (QmaxPlant).
+//   Example: U_Droop_pct = 5%, U_meas = 20 kV, U_spt = 20.5 kV, QmaxPlant = 15 000 kVAr
+//     → dU_pu = 0.025 → Q_command = (0.025 / 0.05) × 15 000 = 7 500 kVAr (50% capacity)
+//
+// ZERO-P REACTIVE CAPABILITY (Art. 150, 152 — ISCE Test 10):
+//   Q dispatch is NOT gated on P > 0. Inverter Available logic (InverterMonitor) does
+//   not gate on active power output — inverters with OperMode = 308 can source/sink Q
+//   even when WSpt = 0. FaultHandler maintains OperMode = 308 for healthy inverters.
+//   Do NOT add any P > 0 guard to Q dispatch logic here or in ReactiveControl.
+//
+// CALLED FROM: FB_PPC_Controller (step ⑤, after FB_PPC_FreqResponse step ④)
+// OUTPUT CONSUMER: FC_PPC_ReactiveControl (step ⑦) receives Q_setpoint_final
+// TEST ARTICLES: Art. 147/152 (Test 8 P-Q diagram), Art. 160/163 (Test 9 U-Q control),
+//                Art. 150/152 (Test 10 zero-P reactive), ISCE Test 6 (Q ramp rates)
+// =============================================================================
+
+FUNCTION_BLOCK "FB_PPC_QCapability"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // kW, plant actual active power from grid meter (measurement, not setpoint).
+    P_actual_kW      : REAL;
+
+    // kW, plant rated active power (= Pn_MW × 1000). Used to compute P_pct for table.
+    Pmax_kW          : REAL;
+
+    // kVAr, external Q command from SCADA/upstream (used in Control_Mode = 0).
+    Q_setpoint_ext   : REAL;
+
+    // kV, voltage setpoint from SCADA/AGC (used in Control_Mode = 1 voltage droop).
+    U_setpoint_ext   : REAL;
+
+    // kV, MV busbar measured voltage (from AI — grid meter or VT on MV bus).
+    U_meas           : REAL;
+
+    // Reactive control mode for this FC:
+    //   0 = Fixed Q (use Q_setpoint_ext, ramp, clamp)
+    //   1 = Voltage droop (compute Q from U error, ramp, clamp)
+    //   2 = Off (Q = 0; used when ReactiveControl Plant_VArMode = 2 PF)
+    Control_Mode     : INT;
+
+    // %, voltage droop percentage. 5% means full Q at 5% per-unit voltage deviation.
+    U_Droop_pct      : REAL;
+
+    // kVAr/s, fast Q ramp rate. ISCE Test 6 fast-ramp sub-test. SCADA-writable.
+    Q_Ramp_Rate_fast : REAL;
+
+    // kVAr/s, slow Q ramp rate. ISCE Test 6 slow-ramp sub-test. SCADA-writable.
+    Q_Ramp_Rate_slow : REAL;
+
+    // FALSE = use slow rate; TRUE = use fast rate. SCADA-switchable during Test 6.
+    Q_Ramp_Fast_Sel  : BOOL;
+
+    // kVAr, total available reactive capacity from FC_PPC_InverterMonitor.
+    QmaxPlant        : REAL;
+
+    // s, OB30 cycle time (0.1 for 100 ms). Passed from FB_PPC_Controller input.
+    CycleTime_s      : REAL;
+
+    // Current plant mode. 2 = FALLBACK → ramp Q to zero gracefully.
+    Plant_Mode       : INT;
+END_VAR
+
+VAR_OUTPUT
+    // kVAr, plant-level Q command after ramp and P-Q capability clamp.
+    // Fed to FC_PPC_ReactiveControl as Q_cmd_kVAr for per-inverter proportional dispatch.
+    Q_setpoint_final : REAL;
+
+    // kVAr, inductive (lagging/underexcited) Q limit at current P operating point.
+    // SCADA diagnostic; updated every cycle. Test 8 reads this at each P tier.
+    Q_max_inductive  : REAL;
+
+    // kVAr, capacitive (leading/overexcited) Q limit at current P operating point.
+    Q_max_capacitive : REAL;
+
+    // TRUE when Q_setpoint_final was clamped by P-Q capability envelope.
+    // SCADA diagnostic/alarm.
+    Q_limited        : BOOL;
+END_VAR
+
+VAR
+    // Q ramp accumulator — retained between OB30 cycles.
+    // Moved from FB_PPC_Controller.Ramps_Qcmd (which is now removed).
+    Ramps_Qcmd : REAL;
+
+    // P-Q capability table — 5 points at P_pct = 0, 25, 50, 75, 100%.
+    // Configure from HMI/SCADA via instance DB before ISCE Test 8.
+    // Default: 20 000 kVAr at all tiers (non-limiting until commissioned).
+    PQ_Table   : Array[0..4] of "UDT_PQ_CapPoint";
+END_VAR
+
+VAR_TEMP
+    P_pct           : REAL;    // P_actual_kW as % of Pmax_kW (0..100)
+    tbl_idx         : INT;     // Lower bracket index (0..3) for linear interpolation
+    t0              : REAL;    // Fractional position in interval [tbl_idx, tbl_idx+1]
+    Q_ind_interp    : REAL;    // kVAr, interpolated inductive Q limit
+    Q_cap_interp    : REAL;    // kVAr, interpolated capacitive Q limit
+    Q_command       : REAL;    // kVAr, Q from control mode (before ramp)
+    effectiveTarget : REAL;    // kVAr, after FALLBACK override
+    delta           : REAL;    // kVAr, ramp error
+    maxStep         : REAL;    // kVAr, maximum change this scan
+    absDelta        : REAL;    // kVAr, ABS(delta) — cannot nest ABS inside MIN
+    Q_ramp_rate     : REAL;    // kVAr/s, selected ramp rate
+    dU_pu           : REAL;    // Fractional per-unit voltage error for droop
+    Q_before_clamp  : REAL;    // kVAr, ramped Q before capability clamp (for Q_limited flag)
+END_VAR
+
+BEGIN
+
+    // ── P-Q capability table interpolation ───────────────────────────────────
+    // Compute current P as % of nameplate, then linearly interpolate Q limits.
+    IF #Pmax_kW > 0.0 THEN
+        #P_pct := #P_actual_kW / #Pmax_kW * 100.0;
+    ELSE
+        #P_pct := 0.0;
+    END_IF;
+    IF #P_pct < 0.0 THEN   #P_pct := 0.0;   END_IF;
+    IF #P_pct > 100.0 THEN #P_pct := 100.0; END_IF;
+
+    // Table step = 25%. REAL_TO_DINT truncates (floor for positive values).
+    // tbl_idx = floor(P_pct / 25), clamped to [0, 3] (3 is last valid lower bracket).
+    #tbl_idx := DINT_TO_INT(REAL_TO_DINT(#P_pct / 25.0));
+    IF #tbl_idx > 3 THEN #tbl_idx := 3; END_IF;
+    IF #tbl_idx < 0 THEN #tbl_idx := 0; END_IF;
+
+    // Fractional position within interval [tbl_idx × 25%, (tbl_idx+1) × 25%]
+    #t0 := (#P_pct - INT_TO_REAL(#tbl_idx) * 25.0) / 25.0;
+
+    // Linear interpolation between bracketing table rows
+    #Q_ind_interp := #PQ_Table[#tbl_idx].Q_ind_max
+                   + #t0 * (#PQ_Table[#tbl_idx + 1].Q_ind_max - #PQ_Table[#tbl_idx].Q_ind_max);
+    #Q_cap_interp := #PQ_Table[#tbl_idx].Q_cap_max
+                   + #t0 * (#PQ_Table[#tbl_idx + 1].Q_cap_max - #PQ_Table[#tbl_idx].Q_cap_max);
+
+    // Also clamp to physical inverter reactive capacity (belt-and-suspenders)
+    IF #Q_ind_interp > #QmaxPlant THEN #Q_ind_interp := #QmaxPlant; END_IF;
+    IF #Q_cap_interp > #QmaxPlant THEN #Q_cap_interp := #QmaxPlant; END_IF;
+
+    #Q_max_inductive  := #Q_ind_interp;
+    #Q_max_capacitive := #Q_cap_interp;
+
+    // ── Q command from selected control mode ──────────────────────────────────
+    CASE #Control_Mode OF
+
+        0:  // Fixed Q setpoint — use external command directly
+            #Q_command := #Q_setpoint_ext;
+
+        1:  // Voltage droop — Q proportional to per-unit voltage error
+            // dU_pu = (U_spt - U_meas) / U_meas  (dimensionless, pu of actual voltage)
+            // Q = dU_pu / (U_Droop_pct/100) × QmaxPlant
+            // Positive dU (under-voltage) → positive Q (inductive, absorb vars)
+            IF (#U_meas > 0.0) AND (#U_Droop_pct > 0.0) THEN
+                #dU_pu    := (#U_setpoint_ext - #U_meas) / #U_meas;
+                #Q_command := (#dU_pu / (#U_Droop_pct / 100.0)) * #QmaxPlant;
+            ELSE
+                #Q_command := 0.0;
+            END_IF;
+
+    ELSE   // Mode 2 (Off) or unknown: Q = 0
+        #Q_command := 0.0;
+
+    END_CASE;
+
+    // ── Q ramp rate limiting (ISCE Test 6) ────────────────────────────────────
+    IF #Q_Ramp_Fast_Sel THEN
+        #Q_ramp_rate := #Q_Ramp_Rate_fast;
+    ELSE
+        #Q_ramp_rate := #Q_Ramp_Rate_slow;
+    END_IF;
+
+    // In FALLBACK: ramp Q to zero — do not jump
+    IF #Plant_Mode = 2 THEN
+        #effectiveTarget := 0.0;
+    ELSE
+        #effectiveTarget := #Q_command;
+    END_IF;
+
+    #delta := #effectiveTarget - #Ramps_Qcmd;
+
+    IF #delta > 0.0 THEN
+        #maxStep    := #Q_ramp_rate * #CycleTime_s;
+        #Ramps_Qcmd := #Ramps_Qcmd + MIN(IN1 := #delta, IN2 := #maxStep);
+    ELSIF #delta < 0.0 THEN
+        #maxStep    := #Q_ramp_rate * #CycleTime_s;
+        #absDelta   := ABS(#delta);
+        #Ramps_Qcmd := #Ramps_Qcmd - MIN(IN1 := #absDelta, IN2 := #maxStep);
+    END_IF;
+
+    // ── P-Q capability clamp ──────────────────────────────────────────────────
+    #Q_before_clamp := #Ramps_Qcmd;
+
+    IF #Ramps_Qcmd > #Q_cap_interp THEN
+        #Q_setpoint_final := #Q_cap_interp;
+    ELSIF #Ramps_Qcmd < -#Q_ind_interp THEN
+        #Q_setpoint_final := -#Q_ind_interp;
+    ELSE
+        #Q_setpoint_final := #Ramps_Qcmd;
+    END_IF;
+
+    // Belt-and-suspenders: also clamp to physical inverter capacity
+    IF #Q_setpoint_final >  #QmaxPlant THEN #Q_setpoint_final :=  #QmaxPlant; END_IF;
+    IF #Q_setpoint_final < -#QmaxPlant THEN #Q_setpoint_final := -#QmaxPlant; END_IF;
+
+    #Q_limited := (#Q_before_clamp > #Q_cap_interp) OR (#Q_before_clamp < -#Q_ind_interp);
+
+END_FUNCTION_BLOCK

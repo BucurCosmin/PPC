@@ -1,0 +1,9 @@
+TYPE "UDT_PQ_CapPoint"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   STRUCT
+      P_pct     : REAL;   // % of Pmax: configure as 0, 25, 50, 75, 100
+      Q_ind_max : REAL;   // kVAr, inductive (lagging/underexcited) limit at this P tier
+      Q_cap_max : REAL;   // kVAr, capacitive (leading/overexcited) limit at this P tier
+   END_STRUCT;
+END_TYPE

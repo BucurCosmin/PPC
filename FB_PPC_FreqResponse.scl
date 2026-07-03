@@ -1,0 +1,242 @@
+// =============================================================================
+// FB_PPC_FreqResponse — Frequency-responsive active power control (P-f droop)
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Implements primary frequency response (RFA — Reglaj Frecventa-Activitate)
+//   required by ANRE Ordinul 51/2019 and Ordinul 60/2024 for Category D plants.
+//   Called from FB_PPC_Controller step ④, AFTER FC_PPC_RampControl.
+//   Droop correction is added POST-ramp so frequency response is never rate-limited.
+//
+// DROOP FORMULA (Art. 114–115, Art. 118–120):
+//   dP = -(2 × Pn_kW × df) / Droop_pct        [kW]
+//   where  Pn_kW = Pn_MW × 1000,  df = f_active − f_nom  [Hz]
+//   Over-frequency → negative dP (reduce P)
+//   Under-frequency → positive dP (increase P)
+//   Dead band: |df| ≤ DeadBand_mHz / 1000 → dP = 0 (no response inside dead band)
+//   Art.117 sub-test: set DeadBand_mHz = 0 via SCADA to verify response at df = 50 mHz.
+//
+// DYNAMIC PMIN/PMAX BAND (Note 1 of ISCE test program):
+//   dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct   [headroom at 200 mHz reference]
+//   Pmin_active  = Pmin_stab + dP_at_200mHz
+//   Pmax_active  = Pmax_disp − dP_at_200mHz
+//   Ensures full ±200 mHz droop response fits in operable band without saturation.
+//   Recomputed every cycle — tracks irradiance changes via Pmax_disp = PmaxPlant.
+//
+// TRIP (Art. 118–120):
+//   Trip_FreqFault latches TRUE when f > OFRT_Trip_Hz (51.5 Hz) or f < UFRT_Trip_Hz (47.5 Hz).
+//   When tripped: P_setpoint_final = 0 immediately (bypasses ramp — emergency response).
+//   CALLER (FB_PPC_Controller step ④ note) MUST also reset Ramps_Pcmd := 0 when
+//   Trip_FreqFault is TRUE so RampControl restarts from 0 after trip clears.
+//   Trip clears on rising edge of Reconnect_Enable, provided f is back in normal band.
+//
+// RECONNECT TIMER (ISCE Test 7):
+//   Reconnect_TON runs while Reconnecting = TRUE (trip cleared but P < 95% Pmax_active).
+//   Reconnect_Timer_s = elapsed seconds since trip cleared. Required for ISCE timing test.
+//
+// FREQUENCY SOURCE SELECTION (ISCE test rig requirement):
+//   Frequency_Source_Sel = FALSE → use f_meas (grid AI measurement, normal operation)
+//   Frequency_Source_Sel = TRUE  → use Freq_Test_Override (ISCE 4–20 mA test signal,
+//                                   mapped 47.5–52.0 Hz, drives all frequency response logic)
+//   Both inputs must be exposed to SCADA so the commissioning team can switch during the
+//   ISCE campaign without a code change.
+//
+// CALLED FROM: FB_PPC_Controller (step ④, after FC_PPC_RampControl step ③)
+// PRECONDITION: Pmax_disp = PmaxPlant from InverterMonitor (same cycle)
+// ARTICLES: 114–115 (over-freq droop), 117 (fine response / dead band),
+//           118–120 (under-freq droop + trip), 126–131 (reconnect timing)
+// =============================================================================
+
+FUNCTION_BLOCK "FB_PPC_FreqResponse"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Grid-measured frequency in Hz from an analog input (normal operation source).
+    f_meas               : REAL;
+
+    // ISCE test bench frequency in Hz (4–20 mA analog, 47.5–52.0 Hz range).
+    // Wired from SCADA-writable register for ISCE campaign.
+    Freq_Test_Override   : REAL;
+
+    // Source selector: FALSE = f_meas (normal), TRUE = Freq_Test_Override (ISCE test).
+    // Must be SCADA-writable.
+    Frequency_Source_Sel : BOOL;
+
+    // Nominal grid frequency in Hz (50.0).
+    f_nom                : REAL;
+
+    // Plant nominal rated active power in MW (48.0 for Tandarei).
+    // SCADA-configurable DB parameter — do not hardcode.
+    Pn_MW                : REAL;
+
+    // Droop setting in %. ISCE tests at 8.0 and 10.0. Must be SCADA-writable.
+    Droop_pct            : REAL;
+
+    // Dead band in mHz. Default 200. Set to 0 for Art.117 fine-response sub-test.
+    // Hard cutout — NOT a soft blend (test explicitly verifies hard boundary).
+    // Must be SCADA-writable.
+    DeadBand_mHz         : REAL;
+
+    // Upstream P command in kW — output of FC_PPC_RampControl (Ramps_Pcmd).
+    P_setpoint_ext       : REAL;
+
+    // Minimum stable power in kW (plant-specific, typically 0 for PV). SCADA-configurable.
+    Pmin_stab            : REAL;
+
+    // Available plant power in kW = PmaxPlant from FC_PPC_InverterMonitor.
+    // Irradiance-limited; drives Pmax_active for the dynamic band.
+    Pmax_disp            : REAL;
+
+    // Over-frequency trip threshold in Hz (51.5). SCADA-configurable.
+    OFRT_Trip_Hz         : REAL;
+
+    // Under-frequency trip threshold in Hz (47.5). SCADA-configurable.
+    UFRT_Trip_Hz         : REAL;
+
+    // Rising edge clears the trip latch, provided f is back in normal band.
+    // Wire from operator HMI button or SCADA command.
+    Reconnect_Enable     : BOOL;
+
+    // Current plant mode. 2 = FALLBACK → zero P immediately.
+    Plant_Mode           : INT;
+END_VAR
+
+VAR_OUTPUT
+    // kW, upstream setpoint after droop correction and dynamic-band clamp.
+    // Feeds FC_PPC_PowerDistribution (passed as Ramps_Pcmd argument).
+    P_setpoint_final     : REAL;
+
+    // kW, droop correction term only (diagnostic for SCADA/ISCE acquisition).
+    dP_droop             : REAL;
+
+    // kW, current dynamic lower bound (SCADA diagnostic).
+    Pmin_active          : REAL;
+
+    // kW, current dynamic upper bound (SCADA diagnostic).
+    Pmax_active          : REAL;
+
+    // TRUE when frequency outside [UFRT_Trip_Hz, OFRT_Trip_Hz].
+    // While TRUE: P_setpoint_final = 0 and caller resets Ramps_Pcmd = 0.
+    // SCADA alarm. Does NOT command a breaker — only zeros inverter setpoints.
+    Trip_FreqFault       : BOOL;
+
+    // TRUE while recovering from a trip (trip cleared but P not yet at 95% Pmax_active).
+    Reconnecting         : BOOL;
+
+    // Seconds elapsed since trip cleared. For ISCE Test 7 reconnect timing.
+    // Value at the moment Reconnecting goes FALSE = total reconnect duration.
+    Reconnect_Timer_s    : REAL;
+END_VAR
+
+VAR
+    Trip_Latch           : BOOL;   // Latched trip state — set by freq event, cleared by Reconnect_Enable
+    Reconnect_TON        : TON;    // Times the reconnect ramp-up (Test 7)
+    Reconnect_LastEnable : BOOL;   // Previous Reconnect_Enable value for edge detection
+END_VAR
+
+VAR_TEMP
+    f_active             : REAL;   // Hz, selected frequency (real or test-bench)
+    df                   : REAL;   // Hz, deviation from nominal
+    Pn_kW                : REAL;   // kW, Pn_MW × 1000 for formula
+    dP_at_200mHz         : REAL;   // kW, headroom reservation at 200 mHz reference
+    ReconnEnable_Rising  : BOOL;   // Rising edge of Reconnect_Enable
+    P_cmd_raw            : REAL;   // kW, P_setpoint_ext + dP_droop before band clamp
+END_VAR
+
+BEGIN
+
+    // ── Frequency source selection (real measurement vs ISCE test bench) ──────
+    IF #Frequency_Source_Sel THEN
+        #f_active := #Freq_Test_Override;
+    ELSE
+        #f_active := #f_meas;
+    END_IF;
+
+    // ── Convert Pn from MW to kW (formula uses same unit as P setpoints) ──────
+    #Pn_kW := #Pn_MW * 1000.0;
+
+    // ── Dynamic Pmin/Pmax band (Note 1, ISCE test program) ───────────────────
+    // Reserve headroom = full droop response at 200 mHz reference deviation.
+    // Recomputed every cycle so it tracks Pmax_disp (irradiance) and Droop_pct changes.
+    IF #Droop_pct > 0.0 THEN
+        #dP_at_200mHz := (2.0 * #Pn_kW * 0.200) / #Droop_pct;
+    ELSE
+        #dP_at_200mHz := 0.0;
+    END_IF;
+    #Pmin_active := #Pmin_stab + #dP_at_200mHz;
+    #Pmax_active := #Pmax_disp - #dP_at_200mHz;
+
+    // Safety: if Pmax_disp is too low to hold the headroom, collapse band to [0, Pmax_disp]
+    IF #Pmin_active >= #Pmax_active THEN
+        #Pmin_active := 0.0;
+        #Pmax_active := #Pmax_disp;
+    END_IF;
+
+    // ── Trip latch: set on out-of-range frequency, clear manually ─────────────
+    #ReconnEnable_Rising  := #Reconnect_Enable AND NOT #Reconnect_LastEnable;
+    #Reconnect_LastEnable := #Reconnect_Enable;
+
+    // Set trip immediately on any out-of-range frequency
+    IF (#f_active > #OFRT_Trip_Hz) OR (#f_active < #UFRT_Trip_Hz) THEN
+        #Trip_Latch := TRUE;
+    END_IF;
+
+    // Clear trip: Reconnect_Enable rising edge AND frequency back in normal band
+    IF #ReconnEnable_Rising
+       AND (#f_active >= #UFRT_Trip_Hz)
+       AND (#f_active <= #OFRT_Trip_Hz)
+    THEN
+        #Trip_Latch := FALSE;
+    END_IF;
+
+    #Trip_FreqFault := #Trip_Latch;
+
+    // ── Droop calculation and setpoint output ─────────────────────────────────
+    IF #Trip_Latch OR (#Plant_Mode = 2) THEN
+        // Trip or FALLBACK: zero P setpoint immediately — no ramp delay
+        #dP_droop         := 0.0;
+        #P_setpoint_final := 0.0;
+
+    ELSE
+        #df := #f_active - #f_nom;
+
+        IF ABS(#df) <= (#DeadBand_mHz / 1000.0) THEN
+            // Inside dead band: no droop response (hard cutout)
+            #dP_droop := 0.0;
+        ELSE
+            // Outside dead band: apply droop
+            // Over-frequency (df > 0) → dP < 0 (reduce P)
+            // Under-frequency (df < 0) → dP > 0 (increase P)
+            IF #Droop_pct > 0.0 THEN
+                #dP_droop := -(2.0 * #Pn_kW * #df) / #Droop_pct;
+            ELSE
+                #dP_droop := 0.0;
+            END_IF;
+        END_IF;
+
+        // Apply droop correction and clamp to dynamic band
+        #P_cmd_raw := #P_setpoint_ext + #dP_droop;
+
+        IF #P_cmd_raw < #Pmin_active THEN
+            #P_setpoint_final := #Pmin_active;
+        ELSIF #P_cmd_raw > #Pmax_active THEN
+            #P_setpoint_final := #Pmax_active;
+        ELSE
+            #P_setpoint_final := #P_cmd_raw;
+        END_IF;
+
+        // PV inverters cannot produce negative power
+        IF #P_setpoint_final < 0.0 THEN
+            #P_setpoint_final := 0.0;
+        END_IF;
+    END_IF;
+
+    // ── Reconnect timer for ISCE Test 7 ──────────────────────────────────────
+    // Timer runs while trip has cleared but plant has not yet reached 95% of Pmax_active.
+    // ET freezes at the reconnect duration once Reconnecting goes FALSE.
+    #Reconnecting := NOT #Trip_Latch AND (#P_setpoint_final < #Pmax_active * 0.95);
+
+    #Reconnect_TON(IN := #Reconnecting, PT := T#3600S);
+    #Reconnect_Timer_s := DINT_TO_REAL(TIME_TO_DINT(#Reconnect_TON.ET)) / 1000.0;
+
+END_FUNCTION_BLOCK
