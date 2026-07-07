@@ -2,28 +2,241 @@ FUNCTION "FC_SkidElectricStatus" : Void
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.1
 
-// Computes switchgear availability for one skid from its 3 cells:
-//   - cel_traf (transformer cell): breaker closed AND separator closed AND earthing open
-//   - cel_1, cel_2 (output cells): separator closed AND earthing open
-// ELECTRIC_OK = TRUE only if all three cells are in a state that allows power delivery.
-// Call once per skid (10 times) every cycle — see call site pattern below.
+// Maps raw DI tags from 10 switchgear input modules into the Skids array and
+// computes per-cell and per-skid availability for all 10 skids in one call.
+//
+// Call ONCE per OB30 cycle, BEFORE FB_PPC_Controller:
+//   "FC_SkidElectricStatus"(
+//       Skids                    := "PPC_Controller".Skids,
+//       Skid1_sep_cel_1          := <tag>, ...
+//   );
+//
+// ELECTRIC_OK logic per skid:
+//   Cel1_OK    = Sep_Cel1    AND NOT Clp_Cel1
+//   Cel2_OK    = Sep_Cel2    AND NOT Clp_Cel2
+//   CelTraf_OK = Intrerup_CelTraf AND Sep_CelTraf AND NOT Clp_CelTraf
+//   ELECTRIC_OK = Cel1_OK AND Cel2_OK AND CelTraf_OK
+//
+// Contact polarity assumed: TRUE = closed (separator/breaker closed, earthing closed/earthed).
+// VERIFY against actual switchgear auxiliary contact wiring before commissioning.
 
-   VAR_IN_OUT
-      Skid : "Skid_Electric_Status";
-   END_VAR
+VAR_INPUT
+    // ── Skid 1 ────────────────────────────────────────────────────────────────
+    Skid1_sep_cel_1          : Bool;
+    Skid1_clp_cel_1          : Bool;
+    Skid1_sep_cel_2          : Bool;
+    Skid1_clp_cel_2          : Bool;
+    Skid1_intrerup_cel_traf  : Bool;
+    Skid1_sep_cel_traf       : Bool;
+    Skid1_clp_cel_traf       : Bool;
+    // ── Skid 2 ────────────────────────────────────────────────────────────────
+    Skid2_sep_cel_1          : Bool;
+    Skid2_clp_cel_1          : Bool;
+    Skid2_sep_cel_2          : Bool;
+    Skid2_clp_cel_2          : Bool;
+    Skid2_intrerup_cel_traf  : Bool;
+    Skid2_sep_cel_traf       : Bool;
+    Skid2_clp_cel_traf       : Bool;
+    // ── Skid 3 ────────────────────────────────────────────────────────────────
+    Skid3_sep_cel_1          : Bool;
+    Skid3_clp_cel_1          : Bool;
+    Skid3_sep_cel_2          : Bool;
+    Skid3_clp_cel_2          : Bool;
+    Skid3_intrerup_cel_traf  : Bool;
+    Skid3_sep_cel_traf       : Bool;
+    Skid3_clp_cel_traf       : Bool;
+    // ── Skid 4 ────────────────────────────────────────────────────────────────
+    Skid4_sep_cel_1          : Bool;
+    Skid4_clp_cel_1          : Bool;
+    Skid4_sep_cel_2          : Bool;
+    Skid4_clp_cel_2          : Bool;
+    Skid4_intrerup_cel_traf  : Bool;
+    Skid4_sep_cel_traf       : Bool;
+    Skid4_clp_cel_traf       : Bool;
+    // ── Skid 5 ────────────────────────────────────────────────────────────────
+    Skid5_sep_cel_1          : Bool;
+    Skid5_clp_cel_1          : Bool;
+    Skid5_sep_cel_2          : Bool;
+    Skid5_clp_cel_2          : Bool;
+    Skid5_intrerup_cel_traf  : Bool;
+    Skid5_sep_cel_traf       : Bool;
+    Skid5_clp_cel_traf       : Bool;
+    // ── Skid 6 ────────────────────────────────────────────────────────────────
+    Skid6_sep_cel_1          : Bool;
+    Skid6_clp_cel_1          : Bool;
+    Skid6_sep_cel_2          : Bool;
+    Skid6_clp_cel_2          : Bool;
+    Skid6_intrerup_cel_traf  : Bool;
+    Skid6_sep_cel_traf       : Bool;
+    Skid6_clp_cel_traf       : Bool;
+    // ── Skid 7 ────────────────────────────────────────────────────────────────
+    Skid7_sep_cel_1          : Bool;
+    Skid7_clp_cel_1          : Bool;
+    Skid7_sep_cel_2          : Bool;
+    Skid7_clp_cel_2          : Bool;
+    Skid7_intrerup_cel_traf  : Bool;
+    Skid7_sep_cel_traf       : Bool;
+    Skid7_clp_cel_traf       : Bool;
+    // ── Skid 8 ────────────────────────────────────────────────────────────────
+    Skid8_sep_cel_1          : Bool;
+    Skid8_clp_cel_1          : Bool;
+    Skid8_sep_cel_2          : Bool;
+    Skid8_clp_cel_2          : Bool;
+    Skid8_intrerup_cel_traf  : Bool;
+    Skid8_sep_cel_traf       : Bool;
+    Skid8_clp_cel_traf       : Bool;
+    // ── Skid 9 ────────────────────────────────────────────────────────────────
+    Skid9_sep_cel_1          : Bool;
+    Skid9_clp_cel_1          : Bool;
+    Skid9_sep_cel_2          : Bool;
+    Skid9_clp_cel_2          : Bool;
+    Skid9_intrerup_cel_traf  : Bool;
+    Skid9_sep_cel_traf       : Bool;
+    Skid9_clp_cel_traf       : Bool;
+    // ── Skid 10 ───────────────────────────────────────────────────────────────
+    Skid10_sep_cel_1         : Bool;
+    Skid10_clp_cel_1         : Bool;
+    Skid10_sep_cel_2         : Bool;
+    Skid10_clp_cel_2         : Bool;
+    Skid10_intrerup_cel_traf : Bool;
+    Skid10_sep_cel_traf      : Bool;
+    Skid10_clp_cel_traf      : Bool;
+END_VAR
+
+VAR_IN_OUT
+    Skids : Array[0..9] of "Skid_Electric_Status";
+END_VAR
 
 BEGIN
 
-   // Output cell 1: separator closed, earthing switch open (not earthed)
-   #Skid.Cel1_OK := #Skid.Sep_Cel1 AND NOT #Skid.Clp_Cel1;
+    // ── Skid 1 (index 0) ──────────────────────────────────────────────────────
+    #Skids[0].Sep_Cel1          := #Skid1_sep_cel_1;
+    #Skids[0].Clp_Cel1          := #Skid1_clp_cel_1;
+    #Skids[0].Sep_Cel2          := #Skid1_sep_cel_2;
+    #Skids[0].Clp_Cel2          := #Skid1_clp_cel_2;
+    #Skids[0].Intrerup_CelTraf  := #Skid1_intrerup_cel_traf;
+    #Skids[0].Sep_CelTraf       := #Skid1_sep_cel_traf;
+    #Skids[0].Clp_CelTraf       := #Skid1_clp_cel_traf;
+    #Skids[0].Cel1_OK           := #Skids[0].Sep_Cel1 AND NOT #Skids[0].Clp_Cel1;
+    #Skids[0].Cel2_OK           := #Skids[0].Sep_Cel2 AND NOT #Skids[0].Clp_Cel2;
+    #Skids[0].CelTraf_OK        := #Skids[0].Intrerup_CelTraf AND #Skids[0].Sep_CelTraf AND NOT #Skids[0].Clp_CelTraf;
+    #Skids[0].ELECTRIC_OK       := #Skids[0].Cel1_OK AND #Skids[0].Cel2_OK AND #Skids[0].CelTraf_OK;
 
-   // Output cell 2: separator closed, earthing switch open (not earthed)
-   #Skid.Cel2_OK := #Skid.Sep_Cel2 AND NOT #Skid.Clp_Cel2;
+    // ── Skid 2 (index 1) ──────────────────────────────────────────────────────
+    #Skids[1].Sep_Cel1          := #Skid2_sep_cel_1;
+    #Skids[1].Clp_Cel1          := #Skid2_clp_cel_1;
+    #Skids[1].Sep_Cel2          := #Skid2_sep_cel_2;
+    #Skids[1].Clp_Cel2          := #Skid2_clp_cel_2;
+    #Skids[1].Intrerup_CelTraf  := #Skid2_intrerup_cel_traf;
+    #Skids[1].Sep_CelTraf       := #Skid2_sep_cel_traf;
+    #Skids[1].Clp_CelTraf       := #Skid2_clp_cel_traf;
+    #Skids[1].Cel1_OK           := #Skids[1].Sep_Cel1 AND NOT #Skids[1].Clp_Cel1;
+    #Skids[1].Cel2_OK           := #Skids[1].Sep_Cel2 AND NOT #Skids[1].Clp_Cel2;
+    #Skids[1].CelTraf_OK        := #Skids[1].Intrerup_CelTraf AND #Skids[1].Sep_CelTraf AND NOT #Skids[1].Clp_CelTraf;
+    #Skids[1].ELECTRIC_OK       := #Skids[1].Cel1_OK AND #Skids[1].Cel2_OK AND #Skids[1].CelTraf_OK;
 
-   // Transformer cell: breaker closed, separator closed, earthing switch open (not earthed)
-   #Skid.CelTraf_OK := #Skid.Intrerup_CelTraf AND #Skid.Sep_CelTraf AND NOT #Skid.Clp_CelTraf;
+    // ── Skid 3 (index 2) ──────────────────────────────────────────────────────
+    #Skids[2].Sep_Cel1          := #Skid3_sep_cel_1;
+    #Skids[2].Clp_Cel1          := #Skid3_clp_cel_1;
+    #Skids[2].Sep_Cel2          := #Skid3_sep_cel_2;
+    #Skids[2].Clp_Cel2          := #Skid3_clp_cel_2;
+    #Skids[2].Intrerup_CelTraf  := #Skid3_intrerup_cel_traf;
+    #Skids[2].Sep_CelTraf       := #Skid3_sep_cel_traf;
+    #Skids[2].Clp_CelTraf       := #Skid3_clp_cel_traf;
+    #Skids[2].Cel1_OK           := #Skids[2].Sep_Cel1 AND NOT #Skids[2].Clp_Cel1;
+    #Skids[2].Cel2_OK           := #Skids[2].Sep_Cel2 AND NOT #Skids[2].Clp_Cel2;
+    #Skids[2].CelTraf_OK        := #Skids[2].Intrerup_CelTraf AND #Skids[2].Sep_CelTraf AND NOT #Skids[2].Clp_CelTraf;
+    #Skids[2].ELECTRIC_OK       := #Skids[2].Cel1_OK AND #Skids[2].Cel2_OK AND #Skids[2].CelTraf_OK;
 
-   // Skid is available for power delivery only if all three cells are OK
-   #Skid.ELECTRIC_OK := #Skid.Cel1_OK AND #Skid.Cel2_OK AND #Skid.CelTraf_OK;
+    // ── Skid 4 (index 3) ──────────────────────────────────────────────────────
+    #Skids[3].Sep_Cel1          := #Skid4_sep_cel_1;
+    #Skids[3].Clp_Cel1          := #Skid4_clp_cel_1;
+    #Skids[3].Sep_Cel2          := #Skid4_sep_cel_2;
+    #Skids[3].Clp_Cel2          := #Skid4_clp_cel_2;
+    #Skids[3].Intrerup_CelTraf  := #Skid4_intrerup_cel_traf;
+    #Skids[3].Sep_CelTraf       := #Skid4_sep_cel_traf;
+    #Skids[3].Clp_CelTraf       := #Skid4_clp_cel_traf;
+    #Skids[3].Cel1_OK           := #Skids[3].Sep_Cel1 AND NOT #Skids[3].Clp_Cel1;
+    #Skids[3].Cel2_OK           := #Skids[3].Sep_Cel2 AND NOT #Skids[3].Clp_Cel2;
+    #Skids[3].CelTraf_OK        := #Skids[3].Intrerup_CelTraf AND #Skids[3].Sep_CelTraf AND NOT #Skids[3].Clp_CelTraf;
+    #Skids[3].ELECTRIC_OK       := #Skids[3].Cel1_OK AND #Skids[3].Cel2_OK AND #Skids[3].CelTraf_OK;
+
+    // ── Skid 5 (index 4) ──────────────────────────────────────────────────────
+    #Skids[4].Sep_Cel1          := #Skid5_sep_cel_1;
+    #Skids[4].Clp_Cel1          := #Skid5_clp_cel_1;
+    #Skids[4].Sep_Cel2          := #Skid5_sep_cel_2;
+    #Skids[4].Clp_Cel2          := #Skid5_clp_cel_2;
+    #Skids[4].Intrerup_CelTraf  := #Skid5_intrerup_cel_traf;
+    #Skids[4].Sep_CelTraf       := #Skid5_sep_cel_traf;
+    #Skids[4].Clp_CelTraf       := #Skid5_clp_cel_traf;
+    #Skids[4].Cel1_OK           := #Skids[4].Sep_Cel1 AND NOT #Skids[4].Clp_Cel1;
+    #Skids[4].Cel2_OK           := #Skids[4].Sep_Cel2 AND NOT #Skids[4].Clp_Cel2;
+    #Skids[4].CelTraf_OK        := #Skids[4].Intrerup_CelTraf AND #Skids[4].Sep_CelTraf AND NOT #Skids[4].Clp_CelTraf;
+    #Skids[4].ELECTRIC_OK       := #Skids[4].Cel1_OK AND #Skids[4].Cel2_OK AND #Skids[4].CelTraf_OK;
+
+    // ── Skid 6 (index 5) ──────────────────────────────────────────────────────
+    #Skids[5].Sep_Cel1          := #Skid6_sep_cel_1;
+    #Skids[5].Clp_Cel1          := #Skid6_clp_cel_1;
+    #Skids[5].Sep_Cel2          := #Skid6_sep_cel_2;
+    #Skids[5].Clp_Cel2          := #Skid6_clp_cel_2;
+    #Skids[5].Intrerup_CelTraf  := #Skid6_intrerup_cel_traf;
+    #Skids[5].Sep_CelTraf       := #Skid6_sep_cel_traf;
+    #Skids[5].Clp_CelTraf       := #Skid6_clp_cel_traf;
+    #Skids[5].Cel1_OK           := #Skids[5].Sep_Cel1 AND NOT #Skids[5].Clp_Cel1;
+    #Skids[5].Cel2_OK           := #Skids[5].Sep_Cel2 AND NOT #Skids[5].Clp_Cel2;
+    #Skids[5].CelTraf_OK        := #Skids[5].Intrerup_CelTraf AND #Skids[5].Sep_CelTraf AND NOT #Skids[5].Clp_CelTraf;
+    #Skids[5].ELECTRIC_OK       := #Skids[5].Cel1_OK AND #Skids[5].Cel2_OK AND #Skids[5].CelTraf_OK;
+
+    // ── Skid 7 (index 6) ──────────────────────────────────────────────────────
+    #Skids[6].Sep_Cel1          := #Skid7_sep_cel_1;
+    #Skids[6].Clp_Cel1          := #Skid7_clp_cel_1;
+    #Skids[6].Sep_Cel2          := #Skid7_sep_cel_2;
+    #Skids[6].Clp_Cel2          := #Skid7_clp_cel_2;
+    #Skids[6].Intrerup_CelTraf  := #Skid7_intrerup_cel_traf;
+    #Skids[6].Sep_CelTraf       := #Skid7_sep_cel_traf;
+    #Skids[6].Clp_CelTraf       := #Skid7_clp_cel_traf;
+    #Skids[6].Cel1_OK           := #Skids[6].Sep_Cel1 AND NOT #Skids[6].Clp_Cel1;
+    #Skids[6].Cel2_OK           := #Skids[6].Sep_Cel2 AND NOT #Skids[6].Clp_Cel2;
+    #Skids[6].CelTraf_OK        := #Skids[6].Intrerup_CelTraf AND #Skids[6].Sep_CelTraf AND NOT #Skids[6].Clp_CelTraf;
+    #Skids[6].ELECTRIC_OK       := #Skids[6].Cel1_OK AND #Skids[6].Cel2_OK AND #Skids[6].CelTraf_OK;
+
+    // ── Skid 8 (index 7) ──────────────────────────────────────────────────────
+    #Skids[7].Sep_Cel1          := #Skid8_sep_cel_1;
+    #Skids[7].Clp_Cel1          := #Skid8_clp_cel_1;
+    #Skids[7].Sep_Cel2          := #Skid8_sep_cel_2;
+    #Skids[7].Clp_Cel2          := #Skid8_clp_cel_2;
+    #Skids[7].Intrerup_CelTraf  := #Skid8_intrerup_cel_traf;
+    #Skids[7].Sep_CelTraf       := #Skid8_sep_cel_traf;
+    #Skids[7].Clp_CelTraf       := #Skid8_clp_cel_traf;
+    #Skids[7].Cel1_OK           := #Skids[7].Sep_Cel1 AND NOT #Skids[7].Clp_Cel1;
+    #Skids[7].Cel2_OK           := #Skids[7].Sep_Cel2 AND NOT #Skids[7].Clp_Cel2;
+    #Skids[7].CelTraf_OK        := #Skids[7].Intrerup_CelTraf AND #Skids[7].Sep_CelTraf AND NOT #Skids[7].Clp_CelTraf;
+    #Skids[7].ELECTRIC_OK       := #Skids[7].Cel1_OK AND #Skids[7].Cel2_OK AND #Skids[7].CelTraf_OK;
+
+    // ── Skid 9 (index 8) ──────────────────────────────────────────────────────
+    #Skids[8].Sep_Cel1          := #Skid9_sep_cel_1;
+    #Skids[8].Clp_Cel1          := #Skid9_clp_cel_1;
+    #Skids[8].Sep_Cel2          := #Skid9_sep_cel_2;
+    #Skids[8].Clp_Cel2          := #Skid9_clp_cel_2;
+    #Skids[8].Intrerup_CelTraf  := #Skid9_intrerup_cel_traf;
+    #Skids[8].Sep_CelTraf       := #Skid9_sep_cel_traf;
+    #Skids[8].Clp_CelTraf       := #Skid9_clp_cel_traf;
+    #Skids[8].Cel1_OK           := #Skids[8].Sep_Cel1 AND NOT #Skids[8].Clp_Cel1;
+    #Skids[8].Cel2_OK           := #Skids[8].Sep_Cel2 AND NOT #Skids[8].Clp_Cel2;
+    #Skids[8].CelTraf_OK        := #Skids[8].Intrerup_CelTraf AND #Skids[8].Sep_CelTraf AND NOT #Skids[8].Clp_CelTraf;
+    #Skids[8].ELECTRIC_OK       := #Skids[8].Cel1_OK AND #Skids[8].Cel2_OK AND #Skids[8].CelTraf_OK;
+
+    // ── Skid 10 (index 9) ─────────────────────────────────────────────────────
+    #Skids[9].Sep_Cel1          := #Skid10_sep_cel_1;
+    #Skids[9].Clp_Cel1          := #Skid10_clp_cel_1;
+    #Skids[9].Sep_Cel2          := #Skid10_sep_cel_2;
+    #Skids[9].Clp_Cel2          := #Skid10_clp_cel_2;
+    #Skids[9].Intrerup_CelTraf  := #Skid10_intrerup_cel_traf;
+    #Skids[9].Sep_CelTraf       := #Skid10_sep_cel_traf;
+    #Skids[9].Clp_CelTraf       := #Skid10_clp_cel_traf;
+    #Skids[9].Cel1_OK           := #Skids[9].Sep_Cel1 AND NOT #Skids[9].Clp_Cel1;
+    #Skids[9].Cel2_OK           := #Skids[9].Sep_Cel2 AND NOT #Skids[9].Clp_Cel2;
+    #Skids[9].CelTraf_OK        := #Skids[9].Intrerup_CelTraf AND #Skids[9].Sep_CelTraf AND NOT #Skids[9].Clp_CelTraf;
+    #Skids[9].ELECTRIC_OK       := #Skids[9].Cel1_OK AND #Skids[9].Cel2_OK AND #Skids[9].CelTraf_OK;
 
 END_FUNCTION

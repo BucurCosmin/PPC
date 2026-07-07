@@ -18,8 +18,12 @@
 //                                     (receives Q_final_kVAr; Q ramp stripped out)
 //   ⑧  FC_PPC_FaultHandler       →  OperMode overrides; AnyFault, AnyDerating, FaultMask
 //
-// PRECONDITION — caller (OB30) must run BEFORE this FB, once per skid (10x):
-//   "FC_SkidElectricStatus"(Skid := "PPC_Controller".Skids[i]);
+// PRECONDITION — caller (OB30) must run BEFORE this FB (single call):
+//   "FC_SkidElectricStatus"(
+//       Skids                    := "PPC_Controller".Skids,
+//       Skid1_sep_cel_1          := <DI tag>, Skid1_clp_cel_1 := <DI tag>, ...
+//       Skid10_sep_cel_traf      := <DI tag>, Skid10_clp_cel_traf := <DI tag>
+//   );
 //   Skids lives in the PPC_Controller instance DB (static section below) —
 //   no separate SKID_ELECTRIC global DB is required.
 //
