@@ -138,6 +138,15 @@ VAR_INPUT
     // kW, plant actual active power from grid meter (measurement, not setpoint).
     // Used by FB_PPC_QCapability to index into the P-Q capability table.
     P_actual_kW : REAL;
+
+    // Simulation mode — bypasses all hardware-state checks so the PPC logic
+    // (setpoints, ramps, droop, Q capability, mode management) can be tested
+    // without physical inverters or switchgear connected.
+    // When TRUE, every inverter is forced to: Enabled=TRUE, RemReady=TRUE,
+    // CommError=FALSE, Error=FALSE, PwrOffReas=0, DrtStt=0,
+    // WAval=10000 (100% pu), VArAval=10000; and all Skids[i].ELECTRIC_OK=TRUE.
+    // ForceStop (EN_PPC=FALSE) and FALLBACK still stop the plant normally.
+    Sim_Mode : BOOL;
 END_VAR
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -202,6 +211,7 @@ VAR_TEMP
     FaultMask       : WORD;
     P_final_kW      : REAL;   // kW, after droop correction (FreqResp output → PowerDist input)
     Q_final_kVAr    : REAL;   // kVAr, after P-Q clamp (QCap output → ReactiveCtrl input)
+    i_sim           : INT;    // loop index for Sim_Mode override
 END_VAR
 
 
@@ -257,6 +267,25 @@ BEGIN
 
     #WD_Expired := #Watchdog_TON.Q;
 
+
+    // =========================================================================
+    // SIMULATION MODE — force all hardware-state fields to healthy values
+    // =========================================================================
+    // Runs BEFORE InverterMonitor so the forced values flow through every
+    // downstream FC unchanged. ForceStop and FALLBACK are not overridden.
+    IF #Sim_Mode THEN
+        FOR #i_sim := 0 TO 9 DO
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].Enabled    := TRUE;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].RemReady   := TRUE;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].CommError  := FALSE;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].Error      := FALSE;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].PwrOffReas := 0;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].DrtStt     := 0;
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].WAval      := 10000; // 100% FIX4
+            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].VArAval    := 10000; // 100% FIX4
+            #Skids[#i_sim].ELECTRIC_OK := TRUE;
+        END_FOR;
+    END_IF;
 
     // =========================================================================
     // ①  FC_PPC_InverterMonitor

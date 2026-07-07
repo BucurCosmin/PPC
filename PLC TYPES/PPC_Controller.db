@@ -69,6 +69,11 @@ NON_RETAIN
       Q_max_capacitive : Real;     // kVAr, capacitive capability at current P (ISCE Test 8)
       Q_limited : Bool;            // TRUE: Q command was clamped by P-Q envelope
 
+
+      // ── Simulation mode (SCADA-writable) ────────────────────────────────────
+      Sim_Mode : Bool;             // TRUE: bypass hardware checks (comms, switchgear, faults)
+                                   // Forces all inverters Enabled/RemReady/no faults, WAval=100%,
+                                   // all Skids ELECTRIC_OK=TRUE. ForceStop and FALLBACK still active.
    END_VAR
 
 
