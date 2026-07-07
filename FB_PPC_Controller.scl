@@ -20,10 +20,13 @@
 //
 // PRECONDITION — caller (OB30) must run BEFORE this FB (single call):
 //   "FC_SkidElectricStatus"(
-//       Skids                    := "PPC_Controller".Skids,
-//       Skid1_sep_cel_1          := <DI tag>, Skid1_clp_cel_1 := <DI tag>, ...
-//       Skid10_sep_cel_traf      := <DI tag>, Skid10_clp_cel_traf := <DI tag>
+//       Skid1  := "PPC_Controller".Skids[0],
+//       Skid2  := "PPC_Controller".Skids[1],
+//       ...
+//       Skid10 := "PPC_Controller".Skids[9]
 //   );
+//   DI tags (e.g. "Skid1_sep_cel_1") are read directly from the Default tag
+//   table inside the FC — no wiring needed at the call site for those signals.
 //   Skids lives in the PPC_Controller instance DB (static section below) —
 //   no separate SKID_ELECTRIC global DB is required.
 //
