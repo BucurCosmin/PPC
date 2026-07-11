@@ -1,0 +1,127 @@
+// =============================================================================
+// FC_PPC_InitData  —  Default parameter initialisation for CEF Tandarei 48 MW
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Writes all site-specific default values to "PPC_Controller" (DB39) and
+//   resets runtime-state fields (ramp accumulators, trip latches) inside the
+//   FB_PPC_Controller instance DB.
+//
+//   Call this FC in two places:
+//
+//   1.  OB100 (Startup OB) — unconditionally, so a fresh power-on or code
+//       download always puts the plant in a known default state:
+//
+//           "FC_PPC_InitData"();
+//
+//   2.  OB30 (cyclic, 100 ms) — guarded by the SCADA "Reset to defaults"
+//       trigger, then self-cleared so it runs for exactly one cycle:
+//
+//           IF "PPC_Controller".ResetToDefaults THEN
+//               "FC_PPC_InitData"();
+//               "PPC_Controller".ResetToDefaults := FALSE;
+//           END_IF;
+//
+// WHAT IS WRITTEN:
+//   • Plant sizing           — WRtg_kW, Pn_MW
+//   • Active power ramps     — P_RampUp, P_RampDown
+//   • Frequency response     — f_nom, Droop_OF_pct, Droop_UF_pct, DeadBand_mHz, Pmin_stab,
+//                              OFRT_Trip_Hz, UFRT_Trip_Hz
+//   • Reactive power         — VArControl_Mode, U_nom_kV, U_setpoint_ext, U_Droop_pct,
+//                              Q_Ramp_Rate_fast, Q_Ramp_Rate_slow, Q_Ramp_Fast_Sel
+//   • P-Q capability table   — all 5 tiers → 20 000 kVAr (non-limiting default)
+//   • Runtime state reset    — Ramps_Qcmd := 0, Trip_Latch := FALSE,
+//                              Reconnect_Enable := FALSE
+//
+// WHAT IS NOT WRITTEN:
+//   • Sim_Mode               — must be set deliberately by operator; never
+//                              auto-cleared by a defaults reset
+//   • LocalMode_Req          — operator selector state, not a parameter
+//   • Any measured / derived value (Plant_Mode, N_Online, Ramps_Pcmd …)
+//
+// INSTANCE DB NAME:
+//   "FB_PPC_Controller_DB" — must match the actual IDB name assigned when the
+//   FB_PPC_Controller call was placed in OB30.  If you renamed it, update all
+//   four references below.
+//
+// CALLED FROM: OB100 (unconditional) + OB30 (guarded, see above)
+// =============================================================================
+
+FUNCTION "FC_PPC_InitData" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+// No inputs or outputs — all writes go directly to the global DB and instance DB.
+
+BEGIN
+
+    // ── Plant sizing ──────────────────────────────────────────────────────────
+    // 10 × SMA SC 4600 UP = 46 MW nameplate.
+    "PPC_Controller".WRtg_kW         := 4600.0;   // kW per inverter (SMA SC 4600 UP rated active power)
+    "PPC_Controller".Pn_MW           := 46.0;      // MW, plant nominal power for droop formula
+
+    // ── Active power ramp rates ───────────────────────────────────────────────
+    // 1 MW/s = 2.1 % Pn/min — reasonable for grid-code compliance.
+    // Adjust P_RampDown separately if the grid requires asymmetric rates.
+    "PPC_Controller".P_RampUp        := 1000.0;   // kW/s — ramp-up rate (AGC setpoint increase)
+    "PPC_Controller".P_RampDown      := 1000.0;   // kW/s — ramp-down rate (AGC setpoint decrease)
+
+    // ── Frequency response (ANRE Ord 51/2019, Art. 114-120) ──────────────────
+    "PPC_Controller".f_nom           := 50.0;     // Hz, nominal grid frequency
+    "PPC_Controller".Droop_OF_pct     := 8.0;      // %  — OF droop (Art. 114-115)
+    "PPC_Controller".Droop_UF_pct     := 10.0;     // %  — UF droop (Art. 118-120)
+    "PPC_Controller".DeadBand_mHz    := 200.0;    // mHz — set 0 for Art.117 fine-response sub-test
+    "PPC_Controller".Pmin_stab       := 0.0;      // kW  — minimum stable power (PV plant = 0)
+    "PPC_Controller".OFRT_Trip_Hz    := 51.5;     // Hz  — over-frequency trip (Art. 118)
+    "PPC_Controller".UFRT_Trip_Hz    := 47.5;     // Hz  — under-frequency trip (Art. 120)
+
+    // ── Reactive power control (ANRE Art. 147, 150, 152, 160, 163) ───────────
+    "PPC_Controller".U_nom_kV        := 110.0;    // kV, 110 kV HV connection point nominal voltage
+    "PPC_Controller".VArControl_Mode := 0;        // 0=fixed Q, 1=U droop, 2=off (Q source in QCap)
+    "PPC_Controller".U_setpoint_ext  := 20.0;     // kV  — MV busbar voltage setpoint (20 kV nom)
+    "PPC_Controller".U_Droop_pct     := 5.0;      // %   — voltage droop (Art. 163 default)
+    "PPC_Controller".Q_Ramp_Rate_fast := 2000.0;  // kVAr/s — fast ramp (ISCE Test 6)
+    "PPC_Controller".Q_Ramp_Rate_slow := 500.0;   // kVAr/s — slow ramp (continuous control)
+    "PPC_Controller".Q_Ramp_Fast_Sel  := TRUE;    // Start with fast ramp; operator can switch slow
+
+    // ── P-Q capability table (ANRE Art. 147, 150, 152) ───────────────────────
+    // Five tiers at P_pct = 0 / 25 / 50 / 75 / 100 %.
+    // Default: 20 000 kVAr at all tiers — non-limiting; replace with actual
+    // inverter datasheet values before ISCE Test 8.
+    // These writes restore the table if a Watch-table entry was corrupted, or if
+    // the IDB was re-initialized (note: FB_PPC_QCapability.scl also has matching
+    // start values in the VAR block, so a fresh download sets these automatically).
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[0].P_pct     :=   0.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[0].Q_ind_max := 20000.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[0].Q_cap_max := 20000.0;
+
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[1].P_pct     :=  25.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[1].Q_ind_max := 20000.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[1].Q_cap_max := 20000.0;
+
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[2].P_pct     :=  50.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[2].Q_ind_max := 20000.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[2].Q_cap_max := 20000.0;
+
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[3].P_pct     :=  75.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[3].Q_ind_max := 20000.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[3].Q_cap_max := 20000.0;
+
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[4].P_pct     := 100.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[4].Q_ind_max := 20000.0;
+    "FB_PPC_Controller_DB".QCap_IDB.PQ_Table[4].Q_cap_max := 20000.0;
+
+    // ── Runtime state reset ───────────────────────────────────────────────────
+    // Clear the Q ramp accumulator — prevents the saturation-at-cap problem that
+    // appears when Ramps_Qcmd is left at a large stale value from a previous run.
+    "FB_PPC_Controller_DB".QCap_IDB.Ramps_Qcmd      := 0.0;
+
+    // Clear the frequency trip latch — avoids a tripped state surviving a CPU
+    // restart (e.g. if frequency was outside band when power was removed).
+    "FB_PPC_Controller_DB".FreqResp_IDB.Trip_Latch   := FALSE;
+
+    // Clear Reconnect_Enable to avoid a spurious rising edge on startup
+    // (edge detector in FreqResponse would otherwise see FALSE→FALSE and ignore
+    // it, but clearing here is defensive and costs nothing).
+    "PPC_Controller".Reconnect_Enable                := FALSE;
+
+END_FUNCTION

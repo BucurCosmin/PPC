@@ -88,8 +88,9 @@ Grid-code compliance: ANRE Ordinul 51/2019, ANRE Ordinul 60/2024, Category D.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | f_nom | Real | 50.0 | Hz, nominal grid frequency |
-| Pn_MW | Real | 48.0 | MW, plant nominal rated power |
-| Droop_pct | Real | 8.0 | %, droop setting (ISCE tests at 8.0 and 10.0) |
+| Pn_MW | Real | 46.0 | MW, plant nominal rated power (10 × SMA SC 4600 UP) |
+| Droop_OF_pct | Real | 8.0 | %, over-frequency droop (Art. 114-115, ANRE Ord.51/2019) |
+| Droop_UF_pct | Real | 10.0 | %, under-frequency droop (Art. 118-120, ANRE Ord.51/2019) |
 | DeadBand_mHz | Real | 200.0 | mHz, dead band (0 for Art.117 fine-response sub-test) |
 | Pmin_stab | Real | 0.0 | kW, minimum stable power |
 | OFRT_Trip_Hz | Real | 51.5 | Hz, over-frequency trip threshold |
@@ -124,7 +125,10 @@ Grid-code compliance: ANRE Ordinul 51/2019, ANRE Ordinul 60/2024, Category D.
 |---|---|---|
 | Q_max_inductive | Real | kVAr, P-Q capability inductive limit at current P |
 | Q_max_capacitive | Real | kVAr, P-Q capability capacitive limit at current P |
-| Q_limited | Bool | TRUE when Q clamped by P-Q capability envelope |
+| Q_limited | Bool | TRUE when Q clamped by ANRE P-Q capability envelope (Stage 1) |
+| SMA_Qmax_plant | Real | kVAr, SMA physical Q limit at current P/U (Stage 2 diagnostic) |
+| Q_SMA_limited | Bool | TRUE when Q clamped by SMA physical envelope (Stage 2) |
+| U_nom_kV | Real | kV, POC nominal voltage (110.0) — U_pu = U_meas / U_nom_kV |
 
 ---
 
@@ -199,18 +203,20 @@ Rate-limits the AGC `Cmd_P` input only. Produces `Ramps_Pcmd` — the smoothed b
 
 **Purpose:** Primary frequency response (RFA). Adds droop correction POST-ramp so frequency events are immediate — not rate-capped by RampControl.
 
-**Droop formula:**
+**Droop formula (split by direction — ANRE Ord.51/2019):**
 ```
-df      = f_active − f_nom
-dP_droop = −(2 × Pn_kW × df) / Droop_pct     [kW]
-P_final_kW = LIMIT(Pmin_active, Ramps_Pcmd + dP_droop, Pmax_active)
+df = f_active − f_nom
+IF df > 0:  dP_droop = −(2 × Pn_kW × df) / Droop_OF_pct   [kW, Art.114-115, reduces P]
+ELSE:       dP_droop = −(2 × Pn_kW × df) / Droop_UF_pct   [kW, Art.118-120, increases P]
+P_final_kW = LIMIT(0, Ramps_Pcmd + dP_droop, Pmax_active)
 ```
 
-**Dynamic band (Note 1, ISCE test program):**
+**Dynamic band (Note 1, ISCE test program) — separate OF/UF headroom:**
 ```
-dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct
-Pmin_active  = Pmin_stab + dP_at_200mHz
-Pmax_active  = Pmax_disp − dP_at_200mHz          [Pmax_disp = PmaxPlant]
+dP_at_200mHz_OF = (2 × Pn_kW × 0.200) / Droop_OF_pct  → 2300 kW at 8%
+dP_at_200mHz_UF = (2 × Pn_kW × 0.200) / Droop_UF_pct  → 1840 kW at 10%
+Pmax_active = Pmax_disp  − dP_at_200mHz_OF   [Pmax_disp = PmaxPlant]
+Pmin_active = Pmin_stab  + dP_at_200mHz_UF   [diagnostic only]
 ```
 
 **Dead band:** `|df| ≤ DeadBand_mHz / 1000` → `dP_droop = 0`. Hard cutout (not soft blend). Set `DeadBand_mHz = 0` for Art.117 fine-response test.
@@ -227,18 +233,28 @@ Pmax_active  = Pmax_disp − dP_at_200mHz          [Pmax_disp = PmaxPlant]
 
 ### FB_PPC_QCapability (step ⑤) — ANRE Ord 51/2019 Art. 147, 150, 152, 160, 163
 
-**Purpose:** Generates plant-level Q command after P-Q capability clamping and Q ramp limiting. Output `Q_final_kVAr` feeds step ⑦.
-
-**P-Q capability (Test 8):** `PQ_Table[0..4]` of `UDT_PQ_CapPoint` stored in instance DB (configure from HMI). 5 tiers at P = 0/25/50/75/100% of `Pmax_kW`. Current Q limits computed by linear interpolation at the actual `P_actual_kW / Pmax_kW` operating point. `Q_setpoint_final` clamped to `[−Q_ind_max, +Q_cap_max]` regardless of control mode.
+**Purpose:** Generates plant-level Q command through two-stage clamping + Q ramp. Output `Q_final_kVAr` feeds step ⑦.
 
 **Q ramp (Test 6):** Rate-limited accumulator `Ramps_Qcmd` (static, moved from FC_PPC_ReactiveControl). Two independently-selectable speeds: `Q_Ramp_Rate_fast` / `Q_Ramp_Rate_slow`, switched via `Q_Ramp_Fast_Sel`. In FALLBACK: effective target forced to 0 → Q ramps down gracefully.
 
 **Control modes (VArControl_Mode — separate from Plant_VArMode):**
-- `0` = Fixed Q: ramp `Q_setpoint_ext` → P-Q clamp → `Q_final_kVAr`
-- `1` = Voltage droop (Test 9): `Q = (dU_pu / (U_Droop_pct/100)) × QmaxPlant` → ramp → clamp
+- `0` = Fixed Q: ramp `Q_setpoint_ext` → Stage 1 → Stage 2 → `Q_final_kVAr`
+- `1` = Voltage droop (Test 9): `Q = (dU_pu / (U_Droop_pct/100)) × QmaxPlant` → ramp → Stage 1 → Stage 2
 - `2` = Off: `Q_final_kVAr = 0` (used when `Plant_VArMode = 2` PF in ReactiveControl)
 
 **Voltage droop gain:** `dU_pu = (U_setpoint_ext − U_meas) / U_meas`. Gain scales with `QmaxPlant` (adaptive to actual inverter capacity). Example: U_Droop_pct=5%, dU=2.5% → Q = 50% of QmaxPlant.
+
+**Stage 1 — ANRE P-Q capability clamp (Test 8):** `PQ_Table[0..4]` of `UDT_PQ_CapPoint` stored in instance DB (configure from HMI before Test 8). 5 tiers at P = 0/25/50/75/100% of `Pmax_kW`. Current Q limits computed by linear interpolation at actual `P_actual_kW / Pmax_kW`. `Q_setpoint_final` clamped to `[−Q_ind_interp, +Q_cap_interp]`. Sets `Q_limited = TRUE` when clamped. Default: 20000 kVAr at all tiers (non-limiting until commissioned).
+
+**Stage 2 — SMA SC 4600 UP physical envelope clamp:** Enforces the hardware limit — the maximum Q the inverter can deliver without exceeding Smax = 4600 kVA. Independent of ANRE table.
+```
+P_per_inv   = P_setpoint_kW / N_Online         // from FreqResponse output, NOT P_actual_kW
+FC_SMA_QEnvelope(P_kW=P_per_inv, U_pu=U_pu)  → Qmax_inv_kVar
+SMA_Q_limit = Qmax_inv_kVar × N_Online
+Q_setpoint_final = LIMIT(−SMA_Q_limit, Q_setpoint_final, +SMA_Q_limit)
+```
+Sets `Q_SMA_limited = TRUE` when clamped. `SMA_Qmax_plant` mirrored to DB39 for diagnostics.
+> Uses `P_setpoint_kW` (FreqResponse output) because P_actual lags ramps and is zero in simulation.
 
 **Zero-P reactive (Test 10):** Q dispatch is NOT gated on P > 0. Inverters with `OperMode=308` (maintained by FaultHandler) can source/sink Q even when `WSpt = 0`.
 
@@ -259,7 +275,9 @@ Distributes `Q_final_kVAr` (from step ⑤ — already ramped and P-Q clamped) ac
 **Modes (Plant_VArMode):**
 - `0` = Off: VArSpt=0, VArMode=303
 - `1` = Q control: distribute `Q_final_kVAr` by VArAval share; VArMode=1072
-- `2` = PF uniform: write `Targets_PF × 10000` to all available inverters; VArMode=1075
+- `2` = PF setpoint:
+  - **Real mode:** PFSpt = Targets_PF × 10000, VArSpt = 0, VArMode=1075. Guard: `|Targets_PF| < 0.1` → PFSpt=10000 (unity PF; SMA rejects PFSpt=0).
+  - **Sim_Mode:** Q = WSpt_i × sqrt(1−PF²)/|PF| × sign(PF), clamped by FC_SMA_QEnvelope, written as VArSpt, VArMode=1072. Enables PF mode verification in watch table without real inverter hardware.
 
 ---
 
@@ -303,10 +321,13 @@ PLC_1 [S7-1500]
 ├── PLC data types
 │   ├── Inverter_controller        [UDT]
 │   ├── Skid_Electric_Status       [UDT]
-│   └── UDT_PQ_CapPoint            [UDT]  — P-Q capability table entry
+│   ├── UDT_PQ_CapPoint            [UDT]  — P-Q capability table entry (ANRE Stage 1)
+│   ├── UDT_SMA_QRow               [UDT]  — {P_kW : Real, Qmax_kVar : Real}
+│   └── UDT_SMA_QTable             [UDT]  — {U085/U090/U095/U100 : Array[0..20] of UDT_SMA_QRow}
 └── Data blocks
     ├── PPC_Controller             [DB39]  — plant-level config + working values
-    └── SKID_ELECTRIC              [DB]    — Skids: Array[0..9] of Skid_Electric_Status
+    ├── SKID_ELECTRIC              [DB]    — Skids: Array[0..9] of Skid_Electric_Status
+    └── DB_SMA_SC4600UP            [DB, constant] — SMA SC 4600 UP P-Q table (4 voltage bins × 21 rows)
 ```
 
 ---
@@ -333,7 +354,7 @@ PLC_1 [S7-1500]
 
 | ISCE Test | Article | Block | Configurable parameter |
 |---|---|---|---|
-| Test 1/2/3 (P-f over/under-freq droop) | Art. 114–120 | FB_PPC_FreqResponse | Droop_pct, DeadBand_mHz |
+| Test 1/2/3 (P-f over/under-freq droop) | Art. 114–120 | FB_PPC_FreqResponse | **Droop_OF_pct** (OF, 8%), **Droop_UF_pct** (UF, 10%), DeadBand_mHz |
 | Test 3 (fine response Art.117) | Art. 117 | FB_PPC_FreqResponse | DeadBand_mHz = 0 via SCADA |
 | Test 4 (full sweep + trip + reconnect) | Art. 118–120 | FB_PPC_FreqResponse | OFRT_Trip_Hz, Reconnect_Enable |
 | Test 6 (Q ramp rates) | — | FB_PPC_QCapability | Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel |

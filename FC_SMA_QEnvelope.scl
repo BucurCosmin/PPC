@@ -1,0 +1,235 @@
+// =============================================================================
+// FC_SMA_QEnvelope — SMA SC 4600 UP reactive power capability lookup
+// -----------------------------------------------------------------------------
+// PURPOSE:
+//   Returns the maximum reactive power (symmetric ± limit) a single SMA
+//   SC 4600 UP inverter can produce at a given active power output and grid
+//   voltage, by 2-D linear interpolation of the manufacturer's P-Q table.
+//
+// INPUTS:
+//   P_kW   — inverter actual active power [kW].  Typically P_actual_kW / N_Online.
+//   U_pu   — grid voltage in per-unit of nominal (e.g. 110 kV bus / 110 kV = 1.0).
+//            Values outside [0.85, 1.15] are clamped to the nearest table edge.
+//
+// OUTPUT:
+//   Qmax_kVar — symmetric reactive power limit [kVar per inverter].
+//               Both overexcited (+) and underexcited (−) limits equal this value.
+//               Returns 0.0 if P_kW exceeds the inverter Pmax at the given voltage.
+//
+// DATA SOURCE:
+//   "DB_SMA_SC4600UP".Table — constant DB with 4 voltage bins × 21 P breakpoints,
+//   stored ascending P (index 0 = P=0, index 20 = Pmax at that voltage).
+//   See DB_SMA_SC4600UP.db for the full dataset.
+//
+// INTERPOLATION ALGORITHM:
+//   P-axis: piecewise-linear scan through 21 rows within the selected voltage bin(s).
+//           P is clamped to [0, 4600 kW] (largest Pmax, i.e. U100 at nominal voltage).
+//           If P > Pmax for a given voltage bin, that bin returns 0 (apparent power limit).
+//   U-axis: four bins at 0.85 / 0.90 / 0.95 / 1.00–1.15 p.u.
+//           Linear interpolation between adjacent bins when U falls between breakpoints.
+//           U ≤ 0.85  → U085 bin only (conservative: real capability may be lower below 0.85)
+//           U > 0.95  → U100 bin only (datasheet valid 1.00–1.15 p.u.; no gain above 1.15)
+//
+// CALLED FROM: FB_PPC_QCapability (Stage 2 physical safety clamp)
+// STAGE ROLE:  Hard limit — Q_setpoint_final is clamped to ±(Qmax_kVar × N_Online)
+//              AFTER the ANRE regulatory target (Stage 1 PQ_Table) is computed.
+// =============================================================================
+
+FUNCTION "FC_SMA_QEnvelope" : VOID
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+VAR_INPUT
+    // Per-inverter active power in kW.
+    // Use P_actual_kW / MAX(N_Online, 1) so each inverter's share is sized correctly.
+    P_kW      : REAL;
+
+    // Grid voltage in per-unit of nominal (e.g. 110 kV measured / 110 kV nominal = 1.0).
+    // Clamped internally to [0.85, 1.15] — the table's valid voltage range.
+    U_pu      : REAL;
+END_VAR
+
+VAR_OUTPUT
+    // Symmetric reactive power limit per inverter [kVar].
+    // Caller applies: Q_setpoint_final := LIMIT(-Qmax_kVar × N_Online,
+    //                                          Q_setpoint_final,
+    //                                         +Qmax_kVar × N_Online)
+    Qmax_kVar : REAL;
+END_VAR
+
+VAR_TEMP
+    P_clamped : REAL;   // P_kW after clamping to [0, 4600]
+    U_clamped : REAL;   // U_pu after clamping to [0.85, 1.15]
+    U_frac    : REAL;   // Interpolation fraction between two U bins (0.0 to 1.0)
+    Qmax_lo   : REAL;   // Qmax from the lower (or only) voltage bin
+    Qmax_hi   : REAL;   // Qmax from the upper voltage bin (used when between two bins)
+    found     : BOOL;   // TRUE once the P bracket is located in the current bin scan
+    idx       : INT;    // FOR loop index — scans P rows 0..19
+    dp        : REAL;   // P interval width between adjacent rows
+    t         : REAL;   // Fractional position within the P interval [0.0, 1.0]
+END_VAR
+
+BEGIN
+
+    // ── 1. Clamp inputs to valid table ranges ─────────────────────────────────
+    #P_clamped := #P_kW;
+    IF #P_clamped < 0.0   THEN #P_clamped := 0.0;    END_IF;
+    IF #P_clamped > 4600.0 THEN #P_clamped := 4600.0; END_IF;   // U100 Pmax — largest bin
+
+    #U_clamped := #U_pu;
+    IF #U_clamped < 0.85  THEN #U_clamped := 0.85;  END_IF;
+    IF #U_clamped > 1.15  THEN #U_clamped := 1.15;  END_IF;
+
+    // ── 2. Select voltage bin(s) and compute Qmax via P interpolation ─────────
+    // Initialise outputs to 0 so any out-of-range P returns 0 naturally.
+    #Qmax_lo := 0.0;
+    #Qmax_hi := 0.0;
+
+    IF #U_clamped <= 0.85 THEN
+
+        // ── U085 only ─────────────────────────────────────────────────────────
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U085[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U085[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U085[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U085[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_lo := "DB_SMA_SC4600UP".Table.U085[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U085[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U085[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+        #Qmax_kVar := #Qmax_lo;
+
+    ELSIF #U_clamped <= 0.90 THEN
+
+        // ── Interpolate between U085 and U090 ─────────────────────────────────
+        #U_frac := (#U_clamped - 0.85) / 0.05;
+
+        // P lookup in U085
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U085[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U085[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U085[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U085[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_lo := "DB_SMA_SC4600UP".Table.U085[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U085[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U085[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+
+        // P lookup in U090
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U090[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U090[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U090[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U090[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_hi := "DB_SMA_SC4600UP".Table.U090[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U090[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U090[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+
+        #Qmax_kVar := #Qmax_lo + #U_frac * (#Qmax_hi - #Qmax_lo);
+
+    ELSIF #U_clamped <= 0.95 THEN
+
+        // ── Interpolate between U090 and U095 ─────────────────────────────────
+        #U_frac := (#U_clamped - 0.90) / 0.05;
+
+        // P lookup in U090
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U090[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U090[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U090[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U090[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_lo := "DB_SMA_SC4600UP".Table.U090[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U090[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U090[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+
+        // P lookup in U095
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U095[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U095[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U095[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U095[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_hi := "DB_SMA_SC4600UP".Table.U095[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U095[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U095[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+
+        #Qmax_kVar := #Qmax_lo + #U_frac * (#Qmax_hi - #Qmax_lo);
+
+    ELSE
+
+        // ── U100 only (U_clamped > 0.95, valid to 1.15 p.u.) ─────────────────
+        #found := FALSE;
+        FOR #idx := 0 TO 19 DO
+            IF NOT #found THEN
+                IF #P_clamped <= "DB_SMA_SC4600UP".Table.U100[#idx + 1].P_kW THEN
+                    #dp := "DB_SMA_SC4600UP".Table.U100[#idx + 1].P_kW
+                         - "DB_SMA_SC4600UP".Table.U100[#idx].P_kW;
+                    IF #dp > 0.0 THEN
+                        #t := (#P_clamped - "DB_SMA_SC4600UP".Table.U100[#idx].P_kW) / #dp;
+                    ELSE
+                        #t := 0.0;
+                    END_IF;
+                    #Qmax_lo := "DB_SMA_SC4600UP".Table.U100[#idx].Qmax_kVar
+                              + #t * ("DB_SMA_SC4600UP".Table.U100[#idx + 1].Qmax_kVar
+                                    - "DB_SMA_SC4600UP".Table.U100[#idx].Qmax_kVar);
+                    #found := TRUE;
+                END_IF;
+            END_IF;
+        END_FOR;
+        #Qmax_kVar := #Qmax_lo;
+
+    END_IF;
+
+    // ── 3. Safety clamp: Qmax must never be negative ──────────────────────────
+    IF #Qmax_kVar < 0.0 THEN
+        #Qmax_kVar := 0.0;
+    END_IF;
+
+END_FUNCTION

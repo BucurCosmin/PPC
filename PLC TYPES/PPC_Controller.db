@@ -15,8 +15,8 @@ NON_RETAIN
       Inverter9 : "Inverter_controller";
       Inverter10 : "Inverter_controller";
       START_CONTROLLER { S7_SetPoint := 'True'} : Bool;
-      P_RampUp : Real;   // kWps
-      P_RampDown : Real;   // kWps
+      P_RampUp : Real := 1000.0;   // kW/s — ramp-up rate (1 MW/s default)
+      P_RampDown : Real := 1000.0;   // kW/s — ramp-down rate (1 MW/s default)
       Q_RampUp : Real;   // kVArps — legacy; superseded by Q_Ramp_Rate_fast/slow
       Q_RampDown : Real;   // legacy; superseded by Q_Ramp_Rate_fast/slow
       PF_Ramp : Real;   // ps
@@ -31,7 +31,7 @@ NON_RETAIN
       Limits_QmaxPlant : Real;
       Ramps_Pcmd : Real;
       Ramps_Qcmd : Real;
-      WRtg_kW : Real;
+      WRtg_kW : Real := 4600.0;   // kW per inverter (SMA SC 4600 UP, 10 × 4600 = 46 MW plant)
       AnyFault : Bool;
       AnyDerating : Bool;
       FaultMask : Word;
@@ -39,8 +39,9 @@ NON_RETAIN
       // ── Frequency response parameters (ANRE Ord 51/2019 Art. 114-120) ─────────
       // All SCADA-writable; change without code reload.
       f_nom : Real := 50.0;        // Hz, nominal grid frequency
-      Pn_MW : Real := 48.0;        // MW, plant nominal rated power (CEF Tandarei 10 × SMA SC)
-      Droop_pct : Real := 8.0;     // %, droop setting (ISCE campaign: 8.0 and 10.0)
+      Pn_MW : Real := 46.0;        // MW, plant nominal rated power (CEF Tandarei 10 × SMA SC 4600 UP)
+      Droop_OF_pct : Real := 8.0;  // %, over-frequency droop (Art. 114-115, ANRE Ord.51/2019)
+      Droop_UF_pct : Real := 10.0; // %, under-frequency droop (Art. 118-120, ANRE Ord.51/2019)
       DeadBand_mHz : Real := 200.0; // mHz, dead band (set 0 for Art.117 fine-response sub-test)
       Pmin_stab : Real := 0.0;     // kW, minimum stable power
       OFRT_Trip_Hz : Real := 51.5; // Hz, over-frequency trip threshold (Art. 118-120)
@@ -48,6 +49,7 @@ NON_RETAIN
       Reconnect_Enable : Bool;     // Rising edge clears freq trip latch (operator/SCADA button)
 
       // ── Frequency response diagnostics (written by FB, SCADA-readable) ────────
+      P_setpoint_final : Real;     // kW, total P sent to inverters = Ramps_Pcmd + dP_droop, clamped
       dP_droop : Real;             // kW, droop correction applied this cycle (ISCE acquisition)
       FreqResp_Pmin : Real;        // kW, dynamic Pmin_active = Pmin_stab + dP_at_200mHz
       FreqResp_Pmax : Real;        // kW, dynamic Pmax_active = PmaxPlant - dP_at_200mHz
@@ -63,12 +65,20 @@ NON_RETAIN
       Q_Ramp_Rate_fast : Real;     // kVAr/s, fast Q ramp rate (ISCE Test 6)
       Q_Ramp_Rate_slow : Real;     // kVAr/s, slow Q ramp rate (ISCE Test 6)
       Q_Ramp_Fast_Sel : Bool;      // FALSE=slow ramp, TRUE=fast ramp
+      U_nom_kV : Real := 110.0;    // kV, POC nominal voltage — U_pu = U_meas / U_nom_kV for SMA envelope
 
       // ── Q capability diagnostics (written by FB, SCADA-readable) ─────────────
       Q_max_inductive : Real;      // kVAr, inductive capability at current P (ISCE Test 8)
       Q_max_capacitive : Real;     // kVAr, capacitive capability at current P (ISCE Test 8)
       Q_limited : Bool;            // TRUE: Q command was clamped by P-Q envelope
+      Q_setpoint_final : Real;       // kVAr, Q output after ramp + P-Q clamp (debug mirror)
+      SMA_Qmax_plant : Real;        // kVAr, SMA physical Q limit at current P/U (Stage 2, diagnostic)
+      Q_SMA_limited : Bool;         // TRUE: Q clamped by SMA physical envelope (Stage 2)
 
+
+      // ── Operator commands (SCADA-writable) ──────────────────────────────────
+      ResetToDefaults : Bool;      // Rising edge: call FC_PPC_InitData (restore all defaults).
+                                   // OB30 self-clears this after one cycle.
 
       // ── Simulation mode (SCADA-writable) ────────────────────────────────────
       Sim_Mode : Bool;             // TRUE: bypass hardware checks (comms, switchgear, faults)
@@ -80,3 +90,7 @@ NON_RETAIN
 BEGIN
 
 END_DATA_BLOCK
+
+
+
+

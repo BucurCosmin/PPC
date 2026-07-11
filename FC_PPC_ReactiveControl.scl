@@ -60,6 +60,17 @@ VAR_INPUT
 
     // Current plant mode. FALLBACK (2) → skip distribution entirely.
     Plant_Mode     : INT;
+
+    // When TRUE: simulation mode — no real inverters execute PF control autonomously.
+    // In Mode 2 + Sim_Mode: compute equivalent Q from WSpt and Targets_PF and write
+    // as VArSpt (VArCtlCom) so PF behaviour is visible in watch table / HMI.
+    // In real mode: Mode 2 always sends PFSpt + VArMode=1075 regardless of this flag.
+    Sim_Mode       : BOOL;
+
+    // Grid voltage in per-unit — passed from FB_PPC_Controller (U_meas / U_nom_kV).
+    // Used in Sim_Mode + Mode 2 to call FC_SMA_QEnvelope and clamp the computed Q
+    // to the inverter's physical capability at the current P and voltage.
+    U_pu           : REAL;
 END_VAR
 
 VAR_IN_OUT
@@ -72,6 +83,10 @@ VAR_TEMP
     i               : INT;    // Loop index
     sumVArAval_raw  : DINT;   // Sum of raw VArAval (pu×10000) for available inverters
     share           : REAL;   // This inverter's fraction of total reactive capacity
+    PF_abs          : REAL;   // ABS(Targets_PF) — used in sim PF→Q conversion
+    tan_phi         : REAL;   // tan(arccos(PF_abs)) = sqrt(1-PF²)/PF — Q/P ratio
+    Q_sim           : REAL;   // Computed Q per inverter for simulation PF mode
+    Qmax_inv        : REAL;   // SMA physical Qmax per inverter from FC_SMA_QEnvelope
 END_VAR
 
 BEGIN
@@ -113,10 +128,46 @@ BEGIN
                     END_IF;
                     #Inverters[#i].VArMode := 1072;   // VArCtlCom
 
-                2:  // ── Mode 2: PF setpoint, uniform across all available units ─
-                    // FIX4 format (×10000). Example: 0.950 → 9500, 1.000 → 10000
-                    #Inverters[#i].PFSpt   := REAL_TO_DINT(#Targets_PF * 10000.0);
-                    #Inverters[#i].VArMode := 1075;   // PFCtlCom
+                2:  // ── Mode 2: PF setpoint ──────────────────────────────────────
+                    IF #Sim_Mode THEN
+                        // Simulation: no real inverter executes PF control autonomously.
+                        // Compute equivalent Q from this inverter's WSpt and PF target,
+                        // then clamp to the SMA physical envelope (same limit the real
+                        // inverter's internal PF controller would respect).
+                        // Q = P × sqrt(1 - PF²) / |PF| × sign(PF)
+                        // sign: positive PF = overexcited = positive Q (capacitive)
+                        #PF_abs := ABS(#Targets_PF);
+                        IF #PF_abs > 0.1 AND #PF_abs <= 1.0 THEN
+                            #tan_phi := SQRT(1.0 - #PF_abs * #PF_abs) / #PF_abs;
+                            #Q_sim   := DINT_TO_REAL(#Inverters[#i].WSpt) * #tan_phi;
+                            IF #Targets_PF < 0.0 THEN #Q_sim := -#Q_sim; END_IF;
+                        ELSE
+                            #Q_sim := 0.0;
+                        END_IF;
+                        // SMA physical envelope clamp — same Stage 2 check as QCapability.
+                        // Prevents PF setpoint from requesting Q the inverter cannot deliver.
+                        "FC_SMA_QEnvelope"(
+                            P_kW      := DINT_TO_REAL(#Inverters[#i].WSpt),
+                            U_pu      := #U_pu,
+                            Qmax_kVar => #Qmax_inv
+                        );
+                        IF #Q_sim >  #Qmax_inv THEN #Q_sim :=  #Qmax_inv; END_IF;
+                        IF #Q_sim < -#Qmax_inv THEN #Q_sim := -#Qmax_inv; END_IF;
+                        #Inverters[#i].VArSpt  := REAL_TO_DINT(#Q_sim);
+                        #Inverters[#i].PFSpt   := 0;
+                        #Inverters[#i].VArMode := 1072;   // VArCtlCom — Q dispatch in sim
+                    ELSE
+                        // Real mode: send PF setpoint — inverter controls Q autonomously.
+                        // FIX4 format (×10000). Example: 0.950 → 9500, 1.000 → 10000
+                        // Guard: SMA rejects PFSpt=0 — default to unity PF if not set yet.
+                        #Inverters[#i].VArSpt  := 0;
+                        IF ABS(#Targets_PF) > 0.1 THEN
+                            #Inverters[#i].PFSpt := REAL_TO_DINT(#Targets_PF * 10000.0);
+                        ELSE
+                            #Inverters[#i].PFSpt := 10000;   // Unity PF safe default
+                        END_IF;
+                        #Inverters[#i].VArMode := 1075;   // PFCtlCom
+                    END_IF;
 
             ELSE
                 // Unknown mode — default to Off for safety

@@ -1,0 +1,7 @@
+TYPE "UDT_SMA_QRow"
+VERSION : 0.1
+   STRUCT
+      P_kW      : Real;   // Active power at this breakpoint [kW per inverter]
+      Qmax_kVar : Real;   // Max reactive power (symmetric ±) at this P and voltage [kVar per inverter]
+   END_STRUCT;
+END_TYPE

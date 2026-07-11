@@ -60,7 +60,14 @@ VERSION : 0.1
 
 VAR_INPUT
     // kW, plant actual active power from grid meter (measurement, not setpoint).
+    // Used for ANRE Stage 1 P-Q table interpolation (P_pct).
     P_actual_kW      : REAL;
+
+    // kW, droop-corrected P setpoint actually dispatched to inverters (P_final_kW from
+    // FB_PPC_FreqResponse). Used for Stage 2 SMA envelope — must reflect what inverters
+    // are commanded this cycle, not what the grid meter reads (which lags during ramps
+    // and is unreliable in simulation).
+    P_setpoint_kW    : REAL;
 
     // kW, plant rated active power (= Pn_MW × 1000). Used to compute P_pct for table.
     Pmax_kW          : REAL;
@@ -100,6 +107,14 @@ VAR_INPUT
 
     // Current plant mode. 2 = FALLBACK → ramp Q to zero gracefully.
     Plant_Mode       : INT;
+
+    // Number of inverters currently online and available for Q dispatch.
+    // Used to compute per-inverter P_kW for the SMA envelope lookup.
+    N_Online         : INT;
+
+    // Grid voltage in per-unit of nominal (U_meas / U_nom_kV).
+    // Computed in FB_PPC_Controller before calling this FB. Valid range: 0.85–1.15 p.u.
+    U_pu             : REAL;
 END_VAR
 
 VAR_OUTPUT
@@ -114,9 +129,17 @@ VAR_OUTPUT
     // kVAr, capacitive (leading/overexcited) Q limit at current P operating point.
     Q_max_capacitive : REAL;
 
-    // TRUE when Q_setpoint_final was clamped by P-Q capability envelope.
+    // TRUE when Q_setpoint_final was clamped by P-Q capability envelope (Stage 1 — ANRE table).
     // SCADA diagnostic/alarm.
     Q_limited        : BOOL;
+
+    // kVAr, SMA physical Q limit for the whole plant at current P and U.
+    // = FC_SMA_QEnvelope output × N_Online. SCADA diagnostic.
+    SMA_Qmax_plant   : REAL;
+
+    // TRUE when Q_setpoint_final was clamped by the SMA physical envelope (Stage 2).
+    // Distinct from Q_limited (Stage 1 ANRE table clamp).
+    Q_SMA_limited    : BOOL;
 END_VAR
 
 VAR
@@ -126,8 +149,15 @@ VAR
 
     // P-Q capability table — 5 points at P_pct = 0, 25, 50, 75, 100%.
     // Configure from HMI/SCADA via instance DB before ISCE Test 8.
-    // Default: 20 000 kVAr at all tiers (non-limiting until commissioned).
-    PQ_Table   : Array[0..4] of "UDT_PQ_CapPoint";
+    // Start values = 20 000 kVAr at all tiers (non-limiting default).
+    // These survive every IDB download; override via Watch table or HMI if needed.
+    PQ_Table   : Array[0..4] of "UDT_PQ_CapPoint" := [
+        (P_pct := 0.0,   Q_ind_max := 20000.0, Q_cap_max := 20000.0),
+        (P_pct := 25.0,  Q_ind_max := 20000.0, Q_cap_max := 20000.0),
+        (P_pct := 50.0,  Q_ind_max := 20000.0, Q_cap_max := 20000.0),
+        (P_pct := 75.0,  Q_ind_max := 20000.0, Q_cap_max := 20000.0),
+        (P_pct := 100.0, Q_ind_max := 20000.0, Q_cap_max := 20000.0)
+    ];
 END_VAR
 
 VAR_TEMP
@@ -144,6 +174,9 @@ VAR_TEMP
     Q_ramp_rate     : REAL;    // kVAr/s, selected ramp rate
     dU_pu           : REAL;    // Fractional per-unit voltage error for droop
     Q_before_clamp  : REAL;    // kVAr, ramped Q before capability clamp (for Q_limited flag)
+    P_per_inv       : REAL;    // kW, per-inverter active power for SMA envelope lookup
+    Qmax_inv        : REAL;    // kVAr, SMA symmetric Q limit for one inverter at current P/U
+    SMA_Q_limit     : REAL;    // kVAr, SMA plant-level Q limit (Qmax_inv × N_Online)
 END_VAR
 
 BEGIN
@@ -243,5 +276,35 @@ BEGIN
     IF #Q_setpoint_final < -#QmaxPlant THEN #Q_setpoint_final := -#QmaxPlant; END_IF;
 
     #Q_limited := (#Q_before_clamp > #Q_cap_interp) OR (#Q_before_clamp < -#Q_ind_interp);
+
+    // ── Stage 2: SMA physical envelope clamp ─────────────────────────────────
+    // Hard safety limit — applies on top of ANRE Stage 1 clamp.
+    // FC_SMA_QEnvelope interpolates the SMA SC 4600 UP P-Q table in 2D (P axis and U axis).
+    // Per-inverter P = plant total P / N_Online; result scaled back by N_Online.
+    // Use P_setpoint_kW (FreqResponse output) — this is what inverters are actually
+    // commanded this cycle. P_actual_kW lags during ramps and is 0 in simulation.
+    IF #N_Online > 0 THEN
+        #P_per_inv := #P_setpoint_kW / INT_TO_REAL(#N_Online);
+    ELSE
+        #P_per_inv := 0.0;
+    END_IF;
+
+    "FC_SMA_QEnvelope"(
+        P_kW      := #P_per_inv,
+        U_pu      := #U_pu,
+        Qmax_kVar => #Qmax_inv
+    );
+
+    #SMA_Q_limit    := #Qmax_inv * INT_TO_REAL(#N_Online);
+    #SMA_Qmax_plant := #SMA_Q_limit;
+
+    #Q_SMA_limited := FALSE;
+    IF #Q_setpoint_final > #SMA_Q_limit THEN
+        #Q_setpoint_final := #SMA_Q_limit;
+        #Q_SMA_limited    := TRUE;
+    ELSIF #Q_setpoint_final < -#SMA_Q_limit THEN
+        #Q_setpoint_final := -#SMA_Q_limit;
+        #Q_SMA_limited    := TRUE;
+    END_IF;
 
 END_FUNCTION_BLOCK

@@ -45,7 +45,8 @@
 //   // FreqResponse parameters (all SCADA-writable):
 //   f_nom          : REAL  := 50.0    — nominal frequency
 //   Pn_MW          : REAL  := 48.0    — plant nominal power in MW
-//   Droop_pct      : REAL  := 8.0     — droop % (ISCE tests at 8.0 and 10.0)
+//   Droop_OF_pct   : REAL  := 8.0     — OF droop % (Art. 114-115)
+//   Droop_UF_pct   : REAL  := 10.0    — UF droop % (Art. 118-120)
 //   DeadBand_mHz   : REAL  := 200.0   — dead band in mHz (0 for Art.117 sub-test)
 //   Pmin_stab      : REAL  := 0.0     — minimum stable power in kW
 //   OFRT_Trip_Hz   : REAL  := 51.5    — over-frequency trip threshold Hz
@@ -65,10 +66,14 @@
 //   Q_Ramp_Rate_fast : REAL          — kVAr/s fast ramp (ISCE Test 6)
 //   Q_Ramp_Rate_slow : REAL          — kVAr/s slow ramp (ISCE Test 6)
 //   Q_Ramp_Fast_Sel  : BOOL          — FALSE=slow, TRUE=fast
+//   // QCapability parameters (cont.):
+//   U_nom_kV         : REAL := 110.0 — POC nominal voltage kV (for U_pu = U_meas / U_nom_kV)
 //   // QCapability diagnostics (SCADA-readable):
 //   Q_max_inductive  : REAL — current Q inductive limit kVAr (ISCE Test 8)
 //   Q_max_capacitive : REAL — current Q capacitive limit kVAr (ISCE Test 8)
-//   Q_limited        : BOOL — Q was clamped by P-Q capability envelope
+//   Q_limited        : BOOL — Q was clamped by ANRE P-Q capability envelope (Stage 1)
+//   SMA_Qmax_plant   : REAL — SMA physical Q limit for plant at current P/U (Stage 2)
+//   Q_SMA_limited    : BOOL — Q was clamped by SMA physical envelope (Stage 2)
 //
 // LOCAL MODE:
 //   When Plant_Mode = 0 (LOCAL), the OB30 caller is responsible for supplying
@@ -142,9 +147,11 @@ VAR_INPUT
     // Simulation mode — bypasses all hardware-state checks so the PPC logic
     // (setpoints, ramps, droop, Q capability, mode management) can be tested
     // without physical inverters or switchgear connected.
-    // When TRUE, every inverter is forced to: Enabled=TRUE, RemReady=TRUE,
+    // When TRUE, every inverter is forced to: RemReady=TRUE,
     // CommError=FALSE, Error=FALSE, PwrOffReas=0, DrtStt=0,
     // WAval=10000 (100% pu), VArAval=10000; and all Skids[i].ELECTRIC_OK=TRUE.
+    // Enabled is NOT forced — set it via watch table to simulate different
+    // fleet sizes (e.g. disable inverters 6-10 to test 5-unit distribution).
     // ForceStop (EN_PPC=FALSE) and FALLBACK still stop the plant normally.
     Sim_Mode : BOOL;
 END_VAR
@@ -212,6 +219,7 @@ VAR_TEMP
     P_final_kW      : REAL;   // kW, after droop correction (FreqResp output → PowerDist input)
     Q_final_kVAr    : REAL;   // kVAr, after P-Q clamp (QCap output → ReactiveCtrl input)
     i_sim           : INT;    // loop index for Sim_Mode override
+    U_pu            : REAL;   // grid voltage in per-unit (U_meas / U_nom_kV) → SMA envelope lookup
 END_VAR
 
 
@@ -265,7 +273,7 @@ BEGIN
         #Watchdog_TON(IN := TRUE,  PT := #Watchdog_Timeout);
     END_IF;
 
-    #WD_Expired := #Watchdog_TON.Q;
+    #WD_Expired := #Watchdog_TON.Q AND NOT #Sim_Mode;
 
 
     // =========================================================================
@@ -273,9 +281,19 @@ BEGIN
     // =========================================================================
     // Runs BEFORE InverterMonitor so the forced values flow through every
     // downstream FC unchanged. ForceStop and FALLBACK are not overridden.
+    //
+    // Enabled is NOT forced — write it freely via watch table / SCADA to
+    // simulate different fleet sizes (e.g. set inverters 6-10 Enabled=FALSE
+    // to test 5-inverter power distribution). All other health fields are
+    // forced healthy so any Enabled inverter is guaranteed Available with
+    // full capacity. Non-Enabled inverters are skipped by InverterMonitor
+    // and N_Online drops accordingly.
+    //
+    // After first download with Sim_Mode=TRUE: set desired inverters
+    // Enabled=TRUE via watch table before starting the test.
     IF #Sim_Mode THEN
         FOR #i_sim := 0 TO 9 DO
-            "PPC_Controller".Inverters.PPC_Inverters[#i_sim].Enabled    := TRUE;
+            // Enabled intentionally not forced — operator-controlled
             "PPC_Controller".Inverters.PPC_Inverters[#i_sim].RemReady   := TRUE;
             "PPC_Controller".Inverters.PPC_Inverters[#i_sim].CommError  := FALSE;
             "PPC_Controller".Inverters.PPC_Inverters[#i_sim].Error      := FALSE;
@@ -347,7 +365,8 @@ BEGIN
         Frequency_Source_Sel := #Frequency_Source_Sel,
         f_nom                := "PPC_Controller".f_nom,
         Pn_MW                := "PPC_Controller".Pn_MW,
-        Droop_pct            := "PPC_Controller".Droop_pct,
+        Droop_OF_pct         := "PPC_Controller".Droop_OF_pct,
+        Droop_UF_pct         := "PPC_Controller".Droop_UF_pct,
         DeadBand_mHz         := "PPC_Controller".DeadBand_mHz,
         P_setpoint_ext       := #Ramps_Pcmd,
         Pmin_stab            := "PPC_Controller".Pmin_stab,
@@ -366,6 +385,7 @@ BEGIN
     END_IF;
 
     // Mirror FreqResponse diagnostics to DB (ISCE acquisition + HMI)
+    "PPC_Controller".P_setpoint_final  := #P_final_kW;
     "PPC_Controller".dP_droop          := #FreqResp_IDB.dP_droop;
     "PPC_Controller".FreqResp_Pmin     := #FreqResp_IDB.Pmin_active;
     "PPC_Controller".FreqResp_Pmax     := #FreqResp_IDB.Pmax_active;
@@ -380,8 +400,16 @@ BEGIN
     // Control_Mode (0=fixed Q, 1=U droop, 2=off) is separate from Plant_VArMode
     // (0=Off, 1=Q dispatch, 2=PF). A caller can set Plant_VArMode=1 and choose
     // the Q source by setting "PPC_Controller".VArControl_Mode = 0 or 1.
+    // U_pu: per-unit voltage used by Stage 2 SMA envelope lookup.
+    IF "PPC_Controller".U_nom_kV > 0.0 THEN
+        #U_pu := #U_meas / "PPC_Controller".U_nom_kV;
+    ELSE
+        #U_pu := 1.0;
+    END_IF;
+
     #QCap_IDB(
         P_actual_kW      := #P_actual_kW,
+        P_setpoint_kW    := #P_final_kW,
         Pmax_kW          := "PPC_Controller".Pn_MW * 1000.0,
         Q_setpoint_ext   := #Cmd_Q,
         U_setpoint_ext   := "PPC_Controller".U_setpoint_ext,
@@ -393,7 +421,9 @@ BEGIN
         Q_Ramp_Fast_Sel  := "PPC_Controller".Q_Ramp_Fast_Sel,
         QmaxPlant        := #QmaxPlant,
         CycleTime_s      := #CycleTime_s,
-        Plant_Mode       := #Plant_Mode
+        Plant_Mode       := #Plant_Mode,
+        N_Online         := #N_Online,
+        U_pu             := #U_pu
     );
     #Q_final_kVAr := #QCap_IDB.Q_setpoint_final;
 
@@ -402,6 +432,9 @@ BEGIN
     "PPC_Controller".Q_max_capacitive := #QCap_IDB.Q_max_capacitive;
     "PPC_Controller".Q_limited        := #QCap_IDB.Q_limited;
     "PPC_Controller".Ramps_Qcmd       := #QCap_IDB.Ramps_Qcmd;
+    "PPC_Controller".Q_setpoint_final := #QCap_IDB.Q_setpoint_final;
+    "PPC_Controller".SMA_Qmax_plant   := #QCap_IDB.SMA_Qmax_plant;
+    "PPC_Controller".Q_SMA_limited    := #QCap_IDB.Q_SMA_limited;
 
 
     // =========================================================================
@@ -423,6 +456,8 @@ BEGIN
         Q_cmd_kVAr    := #Q_final_kVAr,   // ramped + capability-clamped Q from QCapability
         Targets_PF    := #Cmd_PF,
         Plant_Mode    := #Plant_Mode,
+        Sim_Mode      := #Sim_Mode,
+        U_pu          := #U_pu,
         Inverters     := "PPC_Controller".Inverters.PPC_Inverters
     );
 
@@ -451,7 +486,7 @@ BEGIN
     // OUTPUT ASSIGNMENTS
     // =========================================================================
     #Mode_Out   := #Plant_Mode;
-    #PPC_Active := (#Plant_Mode = 1);
+    #PPC_Active := (#Plant_Mode <> 2);
     #PPC_Fault  := #AnyFault_Tmp;
 
 END_FUNCTION_BLOCK

@@ -61,7 +61,9 @@ The 10 inverters are `PPC_Inverters: Array[0..9] of Inverter_controller` in DB39
 | Reconnect_Timer_s | FB after ④ | Reconnect duration s — ISCE Test 7 |
 | Q_max_inductive | FB after ⑤ | Current Q inductive capability kVAr — ISCE Test 8 |
 | Q_max_capacitive | FB after ⑤ | Current Q capacitive capability kVAr — ISCE Test 8 |
-| Q_limited | FB after ⑤ | Q was P-Q clamped — SCADA alarm |
+| Q_limited | FB after ⑤ | Q was clamped by ANRE Stage 1 P-Q table — SCADA alarm |
+| SMA_Qmax_plant | FB after ⑤ | kVAr, SMA physical Q limit at current P/U — Stage 2 diagnostic |
+| Q_SMA_limited | FB after ⑤ | TRUE when Q clamped by SMA physical envelope (Stage 2) — SCADA alarm |
 | Ramps_Qcmd | FB after ⑤ | Q ramp accumulator mirror — HMI trending |
 | AnyFault | FB after ⑧ | Plant-level fault flag — HMI alarm |
 | AnyDerating | FB after ⑧ | Derating state flag — HMI alarm |
@@ -75,8 +77,9 @@ The 10 inverters are `PPC_Inverters: Array[0..9] of Inverter_controller` in DB39
 | P_RampUp | ③ | — | Max ramp-up rate kW/s |
 | P_RampDown | ③ | — | Max ramp-down rate kW/s |
 | f_nom | ④ | 50.0 | Hz, nominal frequency |
-| Pn_MW | ④⑤ | 48.0 | MW, plant nominal rated power |
-| Droop_pct | ④ | 8.0 | %, droop (ISCE tests: 8.0 and 10.0) |
+| Pn_MW | ④⑤ | 46.0 | MW, plant nominal rated power (10 × SMA SC 4600 UP) |
+| Droop_OF_pct | ④ | 8.0 | %, over-frequency droop (Art. 114-115, ANRE Ord.51/2019) |
+| Droop_UF_pct | ④ | 10.0 | %, under-frequency droop (Art. 118-120, ANRE Ord.51/2019) |
 | DeadBand_mHz | ④ | 200.0 | mHz, dead band (0 for Art.117 test) |
 | Pmin_stab | ④ | 0.0 | kW, minimum stable power |
 | OFRT_Trip_Hz | ④ | 51.5 | Hz, over-frequency trip |
@@ -88,6 +91,7 @@ The 10 inverters are `PPC_Inverters: Array[0..9] of Inverter_controller` in DB39
 | Q_Ramp_Rate_fast | ⑤ | — | kVAr/s fast ramp (ISCE Test 6) |
 | Q_Ramp_Rate_slow | ⑤ | — | kVAr/s slow ramp (ISCE Test 6) |
 | Q_Ramp_Fast_Sel | ⑤ | FALSE | FALSE=slow, TRUE=fast |
+| U_nom_kV | ⑤ | 110.0 | kV, POC nominal voltage — U_pu = U_meas / U_nom_kV (SMA envelope) |
 
 ### UDT — Inverter_controller
 
@@ -207,32 +211,41 @@ Ramps_Pcmd := MAX(Ramps_Pcmd, 0.0)          // PV cannot produce negative power
 `Frequency_Source_Sel = TRUE` → use `Freq_Test_Override` (ISCE 4–20 mA test bench, 47.5–52.0 Hz range).
 Both SCADA-writable for switching during ISCE campaign without code change.
 
-#### Droop formula (Art. 114–115, Art. 118–120)
+#### Droop formula (Art. 114–115 OF / Art. 118–120 UF)
+
+ANRE specifies different droop values for each direction — over-frequency uses `Droop_OF_pct` (8%),
+under-frequency uses `Droop_UF_pct` (10%):
 
 ```
 df       = f_active − f_nom
 Pn_kW    = Pn_MW × 1000
 
 IF |df| ≤ DeadBand_mHz / 1000:
-    dP_droop = 0                               // inside dead band — hard cutout
-ELSE:
-    dP_droop = −(2 × Pn_kW × df) / Droop_pct  // over-freq: reduce P; under-freq: increase P
+    dP_droop = 0                                        // inside dead band — hard cutout
+ELSIF df > 0:                                           // over-frequency (Art. 114-115)
+    dP_droop = −(2 × Pn_kW × df) / Droop_OF_pct       // reduces P
+ELSE:                                                   // under-frequency (Art. 118-120)
+    dP_droop = −(2 × Pn_kW × df) / Droop_UF_pct       // increases P
 
-P_cmd_raw      = Ramps_Pcmd + dP_droop
-P_final_kW     = LIMIT(Pmin_active, P_cmd_raw, Pmax_active)
+P_cmd_raw  = Ramps_Pcmd + dP_droop
+P_final_kW = LIMIT(0, P_cmd_raw, Pmax_active)           // Pmin lower clamp: diagnostic only
 ```
 
 Sign convention: df > 0 (over-frequency) → dP_droop < 0 (reduce active power). df < 0 (under-frequency) → dP_droop > 0 (increase active power).
 
 #### Dynamic Pmin/Pmax band (Note 1, ISCE test program)
 
+Each direction reserves its own 200 mHz headroom using its own droop value:
+
 ```
-dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct   // headroom at 200 mHz reference
-Pmin_active  = Pmin_stab + dP_at_200mHz
-Pmax_active  = Pmax_disp − dP_at_200mHz            // Pmax_disp = PmaxPlant from step ①
+dP_at_200mHz_OF = (2 × Pn_kW × 0.200) / Droop_OF_pct  → 2300 kW at 8% (46 MW plant)
+dP_at_200mHz_UF = (2 × Pn_kW × 0.200) / Droop_UF_pct  → 1840 kW at 10%
+
+Pmax_active = Pmax_disp  − dP_at_200mHz_OF    // OF headroom: caps ramp output
+Pmin_active = Pmin_stab  + dP_at_200mHz_UF    // UF headroom: diagnostic only
 ```
 
-Ensures the plant can deliver the full ±200 mHz droop response without saturation. Recomputed every cycle — tracks irradiance changes via PmaxPlant.
+Ensures the plant can deliver the full ±200 mHz droop response without saturation. Recomputed every cycle — tracks irradiance changes via PmaxPlant and droop setting changes.
 
 #### Dead band (Art. 117)
 
@@ -333,17 +346,43 @@ IF delta > 0: Ramps_Qcmd += MIN(delta, Q_ramp_rate × CycleTime_s)
 ELSIF delta < 0: Ramps_Qcmd −= MIN(|delta|, Q_ramp_rate × CycleTime_s)
 ```
 
-#### Capability clamp and Q_limited flag
+#### Stage 1 — ANRE P-Q capability clamp and Q_limited flag
 
 ```
-IF Ramps_Qcmd > Q_cap_interp:  Q_final_kVAr = Q_cap_interp
-ELSIF Ramps_Qcmd < −Q_ind_interp: Q_final_kVAr = −Q_ind_interp
-ELSE: Q_final_kVAr = Ramps_Qcmd
+IF Ramps_Qcmd > Q_cap_interp:  Q_setpoint_final = Q_cap_interp
+ELSIF Ramps_Qcmd < −Q_ind_interp: Q_setpoint_final = −Q_ind_interp
+ELSE: Q_setpoint_final = Ramps_Qcmd
 
-Q_limited = (Ramps_Qcmd clamped by P-Q envelope)
+Q_limited = (Ramps_Qcmd clamped by ANRE P-Q envelope)    // diagnostic
 ```
 
 Also clamps to `QmaxPlant` (belt-and-suspenders: physical inverter capacity).
+
+#### Stage 2 — SMA physical envelope clamp
+
+A second, independent clamp enforces the **SMA SC 4600 UP hardware limit** — the maximum Q the
+inverter can physically deliver at the current P and grid voltage. This is separate from the ANRE
+regulatory table because exceeding it would overload the inverter (S > Smax = 4600 kVA).
+
+```
+P_per_inv   = P_setpoint_kW / N_Online           // per-inverter P (from FreqResponse output)
+FC_SMA_QEnvelope(P_kW := P_per_inv, U_pu := U_pu)  → Qmax_inv_kVar
+SMA_Q_limit = Qmax_inv_kVar × N_Online
+
+IF Q_setpoint_final > +SMA_Q_limit:  Q_setpoint_final = +SMA_Q_limit; Q_SMA_limited = TRUE
+IF Q_setpoint_final < −SMA_Q_limit:  Q_setpoint_final = −SMA_Q_limit; Q_SMA_limited = TRUE
+```
+
+**Key design decisions:**
+- Uses `P_setpoint_kW` (FreqResponse output = what inverters are actually commanded) — NOT
+  `P_actual_kW` (grid meter, lags during ramps and is unreliable/zero in simulation)
+- `U_pu = U_meas / U_nom_kV` (110 kV nominal); division-by-zero guarded to 1.0
+- `SMA_Qmax_plant` and `Q_SMA_limited` mirrored to DB39 for SCADA/ISCE monitoring
+
+**Example at full P load (46 MW, U=1.0 pu):**
+- FreqResponse reserves 2300 kW headroom → P_setpoint = 43700 kW → P_per_inv = 4370 kW
+- FC_SMA_QEnvelope at P=4370 kW → Qmax_inv = 1436 kVAr
+- SMA_Q_limit = 1436 × 10 = 14360 kVAr → plant S = √(43700² + 14360²) ≈ 45826 kVA < 46000 ✓
 
 #### Zero-P reactive capability (Art. 150, 152 — ISCE Test 10)
 
@@ -387,9 +426,24 @@ FOR i = 0 TO 9:
 |---|---|
 | 0 = Off | VArSpt = 0, VArMode = 303 for all available inverters |
 | 1 = Q control | Distribute Q_final_kVAr proportionally by VArAval; VArMode = 1072 |
-| 2 = PF uniform | Write Targets_PF × 10000 to all available inverters; VArMode = 1075 |
+| 2 = PF uniform | Real mode: PFSpt = Targets_PF × 10000, VArMode = 1075. Sim mode: see below |
 
 Mode 1 covers both fixed-Q and U-droop sub-modes — the Q source distinction is resolved upstream in QCapability (VArControl_Mode).
+
+**Mode 2 — PF simulation behaviour (`Sim_Mode = TRUE`):**
+Real SMA inverters execute PF control autonomously from their PFSpt register. In simulation no real
+inverter hardware is present, so PF mode would produce zero visible Q. Instead, the FC computes
+equivalent Q per inverter from P and the PF target, then clamps to the SMA physical envelope:
+
+```
+Q_sim = WSpt_i × sqrt(1 − PF²) / |PF| × sign(PF)
+FC_SMA_QEnvelope(P_kW := WSpt_i, U_pu := U_pu) → Qmax_inv
+Q_sim = LIMIT(−Qmax_inv, Q_sim, +Qmax_inv)
+VArSpt_i = REAL_TO_DINT(Q_sim);  VArMode = 1072   // VArCtlCom in sim
+```
+
+**PFSpt = 0 guard:** SMA inverters reject PFSpt = 0. If `Targets_PF = 0` or not yet set, the FC
+writes `PFSpt = 10000` (unity PF) as a safe default and issues VArMode = 1075.
 
 Returns immediately in FALLBACK — FaultHandler owns safe-state writes.
 
@@ -542,15 +596,16 @@ ELECTRIC_OK is the **6th condition** in `Inverters[i].Available` (step ①). If 
 | 1 | Import `UDT_PQ_CapPoint`, `Skid_Electric_Status`, `Inverter_controller` | Done |
 | 2 | Import all SCL files as program blocks | Done |
 | 3 | Create `SKID_ELECTRIC` DB: `Skids: Array[0..9] of Skid_Electric_Status` | TIA Portal only |
-| 4 | Add new DB39 fields: f_nom, Pn_MW, Droop_pct, DeadBand_mHz, Pmin_stab, OFRT/UFRT_Trip_Hz, Reconnect_Enable, VArControl_Mode, U_setpoint_ext, U_Droop_pct, Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel, and all diagnostic outputs | TIA Portal only |
+| 4 | Add new DB39 fields: f_nom, Pn_MW, **Droop_OF_pct** (8.0), **Droop_UF_pct** (10.0), DeadBand_mHz, Pmin_stab, OFRT/UFRT_Trip_Hz, Reconnect_Enable, VArControl_Mode, **U_nom_kV** (110.0), U_setpoint_ext, U_Droop_pct, Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel, and all diagnostic outputs (SMA_Qmax_plant, Q_SMA_limited) | TIA Portal only |
+| 4a | Import new objects: UDT_SMA_QRow, UDT_SMA_QTable, DB_SMA_SC4600UP (constant DB), FC_SMA_QEnvelope | TIA Portal only |
 | 5 | Configure PQ_Table in QCap instance DB (5 tiers × kVAr values) | Before ISCE Test 8 |
 | 6 | Wire 5 new FB_PPC_Controller inputs in OB30 call (f_meas, Freq_Test_Override, Frequency_Source_Sel, U_meas, P_actual_kW) | Commissioning |
 | 7 | Configure AI blocks: f_meas (4–20 mA → 47.5–52.0 Hz), P_actual (4–20 mA → kW), U_meas | Commissioning |
 | 8 | Wire hardwired DI signals into SKID_ELECTRIC.Skids[i].* fields | Commissioning |
 | 9 | Verify switchgear contact polarity (TRUE = closed assumed) | Before energising |
-| 10 | Set Pn_MW = 48.0, Droop_pct = 8.0, DeadBand_mHz = 200.0, OFRT_Trip_Hz = 51.5, UFRT_Trip_Hz = 47.5 in DB39 | Before ISCE campaign |
+| 10 | Set Pn_MW = 46.0, **Droop_OF_pct = 8.0, Droop_UF_pct = 10.0**, DeadBand_mHz = 200.0, OFRT_Trip_Hz = 51.5, UFRT_Trip_Hz = 47.5, **U_nom_kV = 110.0** in DB39 (FC_PPC_InitData does this automatically) | Before ISCE campaign |
 | 11 | ISCE test sequence: Test 1→2→3→4, then 6→7, then 8→9→10, then 12 | ISCE campaign |
 
 ---
 
-*Document version: 2026-07-03 | Added: FB_PPC_FreqResponse (P-f droop, ANRE Art.114–120), FB_PPC_QCapability (P-Q capability, Art.147–163), Q ramp relocation from FC_PPC_ReactiveControl to QCapability, Ramps_Qcmd moved to multi-instance IDB, call chain extended to 8 steps, 5 new FB inputs (f_meas, Freq_Test_Override, Frequency_Source_Sel, U_meas, P_actual_kW) | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026*
+*Document version: 2026-07-11 | Updated: Split Droop_pct → Droop_OF_pct (8%, Art.114-115) + Droop_UF_pct (10%, Art.118-120) per ANRE; dynamic band now uses separate OF/UF headroom. Added Stage 2 SMA physical envelope clamp in QB_PPC_QCapability (FC_SMA_QEnvelope 2D P-U interpolation, Stage 1=ANRE PQ_Table, Stage 2=SMA SC 4600 UP hardware limit). Added U_nom_kV=110.0 kV, SMA_Qmax_plant, Q_SMA_limited to DB39. Added FC_SMA_QEnvelope + DB_SMA_SC4600UP + UDT_SMA_QRow/QTable. Added Sim_Mode PF→Q conversion in FC_PPC_ReactiveControl with SMA envelope clamp. Fixed WRtg_kW=4600, Pn_MW=46. Stage 2 uses P_setpoint_kW (FreqResponse output) not P_actual_kW. | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026*

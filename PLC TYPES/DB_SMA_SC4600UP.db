@@ -1,0 +1,116 @@
+DATA_BLOCK "DB_SMA_SC4600UP"
+// =============================================================================
+// SMA Sunny Central 4600 UP — P-Q capability lookup table
+// Source: SMA "Sunny Central and Sunny Central Storage — Reactive Power
+//         Capability", Version 2021-03-22, Table 1 (SC 4600 UP)
+//
+// Structure: 4 voltage bins × 21 P breakpoints, stored ascending P (0→Pmax).
+// Qmax is symmetric: overexcited (+Qmax) and underexcited (−Qmax) limits equal.
+// Rows were reversed from the datasheet's descending order so index 0 = P=0.
+//
+// Used by: FC_SMA_QEnvelope (2D interpolation → per-inverter Qmax)
+// Called from: FB_PPC_QCapability (Stage 2 physical safety clamp)
+// =============================================================================
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR
+      Table : "UDT_SMA_QTable";
+   END_VAR
+
+BEGIN
+   // ── U = 0.85 p.u. Un  (Pmax = 3911.0 kW per inverter) ─────────────────────
+   Table.U085[0].P_kW   :=    0.0;   Table.U085[0].Qmax_kVar  := 2760.0;
+   Table.U085[1].P_kW   :=  195.6;   Table.U085[1].Qmax_kVar  := 2760.0;
+   Table.U085[2].P_kW   :=  391.1;   Table.U085[2].Qmax_kVar  := 2760.0;
+   Table.U085[3].P_kW   :=  586.7;   Table.U085[3].Qmax_kVar  := 2760.0;
+   Table.U085[4].P_kW   :=  782.2;   Table.U085[4].Qmax_kVar  := 2760.0;
+   Table.U085[5].P_kW   :=  977.8;   Table.U085[5].Qmax_kVar  := 2760.0;
+   Table.U085[6].P_kW   := 1173.3;   Table.U085[6].Qmax_kVar  := 2760.0;
+   Table.U085[7].P_kW   := 1368.9;   Table.U085[7].Qmax_kVar  := 2760.0;
+   Table.U085[8].P_kW   := 1564.4;   Table.U085[8].Qmax_kVar  := 2760.0;
+   Table.U085[9].P_kW   := 1760.0;   Table.U085[9].Qmax_kVar  := 2760.0;
+   Table.U085[10].P_kW  := 1955.5;   Table.U085[10].Qmax_kVar := 2760.0;
+   Table.U085[11].P_kW  := 2151.1;   Table.U085[11].Qmax_kVar := 2760.0;
+   Table.U085[12].P_kW  := 2346.6;   Table.U085[12].Qmax_kVar := 2760.0;
+   Table.U085[13].P_kW  := 2542.2;   Table.U085[13].Qmax_kVar := 2760.0;
+   Table.U085[14].P_kW  := 2737.7;   Table.U085[14].Qmax_kVar := 2760.0;
+   Table.U085[15].P_kW  := 2933.3;   Table.U085[15].Qmax_kVar := 2586.9;
+   Table.U085[16].P_kW  := 3128.8;   Table.U085[16].Qmax_kVar := 2346.6;
+   Table.U085[17].P_kW  := 3324.4;   Table.U085[17].Qmax_kVar := 2060.3;
+   Table.U085[18].P_kW  := 3519.9;   Table.U085[18].Qmax_kVar := 1704.8;
+   Table.U085[19].P_kW  := 3715.5;   Table.U085[19].Qmax_kVar := 1221.2;
+   Table.U085[20].P_kW  := 3911.0;   Table.U085[20].Qmax_kVar :=    0.0;
+
+   // ── U = 0.90 p.u. Un  (Pmax = 4141.1 kW per inverter) ─────────────────────
+   Table.U090[0].P_kW   :=    0.0;   Table.U090[0].Qmax_kVar  := 2760.0;
+   Table.U090[1].P_kW   :=  207.1;   Table.U090[1].Qmax_kVar  := 2760.0;
+   Table.U090[2].P_kW   :=  414.1;   Table.U090[2].Qmax_kVar  := 2760.0;
+   Table.U090[3].P_kW   :=  621.2;   Table.U090[3].Qmax_kVar  := 2760.0;
+   Table.U090[4].P_kW   :=  828.2;   Table.U090[4].Qmax_kVar  := 2760.0;
+   Table.U090[5].P_kW   := 1035.3;   Table.U090[5].Qmax_kVar  := 2760.0;
+   Table.U090[6].P_kW   := 1242.3;   Table.U090[6].Qmax_kVar  := 2760.0;
+   Table.U090[7].P_kW   := 1449.4;   Table.U090[7].Qmax_kVar  := 2760.0;
+   Table.U090[8].P_kW   := 1656.4;   Table.U090[8].Qmax_kVar  := 2760.0;
+   Table.U090[9].P_kW   := 1863.5;   Table.U090[9].Qmax_kVar  := 2760.0;
+   Table.U090[10].P_kW  := 2070.5;   Table.U090[10].Qmax_kVar := 2760.0;
+   Table.U090[11].P_kW  := 2277.6;   Table.U090[11].Qmax_kVar := 2760.0;
+   Table.U090[12].P_kW  := 2484.6;   Table.U090[12].Qmax_kVar := 2760.0;
+   Table.U090[13].P_kW  := 2691.7;   Table.U090[13].Qmax_kVar := 2760.0;
+   Table.U090[14].P_kW  := 2898.8;   Table.U090[14].Qmax_kVar := 2760.0;
+   Table.U090[15].P_kW  := 3105.8;   Table.U090[15].Qmax_kVar := 2739.1;
+   Table.U090[16].P_kW  := 3312.9;   Table.U090[16].Qmax_kVar := 2484.6;
+   Table.U090[17].P_kW  := 3519.9;   Table.U090[17].Qmax_kVar := 2181.4;
+   Table.U090[18].P_kW  := 3727.0;   Table.U090[18].Qmax_kVar := 1805.1;
+   Table.U090[19].P_kW  := 3934.0;   Table.U090[19].Qmax_kVar := 1293.0;
+   Table.U090[20].P_kW  := 4141.1;   Table.U090[20].Qmax_kVar :=    0.0;
+
+   // ── U = 0.95 p.u. Un  (Pmax = 4371.1 kW per inverter) ─────────────────────
+   Table.U095[0].P_kW   :=    0.0;   Table.U095[0].Qmax_kVar  := 2760.0;
+   Table.U095[1].P_kW   :=  218.6;   Table.U095[1].Qmax_kVar  := 2760.0;
+   Table.U095[2].P_kW   :=  437.1;   Table.U095[2].Qmax_kVar  := 2760.0;
+   Table.U095[3].P_kW   :=  655.7;   Table.U095[3].Qmax_kVar  := 2760.0;
+   Table.U095[4].P_kW   :=  874.2;   Table.U095[4].Qmax_kVar  := 2760.0;
+   Table.U095[5].P_kW   := 1092.8;   Table.U095[5].Qmax_kVar  := 2760.0;
+   Table.U095[6].P_kW   := 1311.3;   Table.U095[6].Qmax_kVar  := 2760.0;
+   Table.U095[7].P_kW   := 1529.9;   Table.U095[7].Qmax_kVar  := 2760.0;
+   Table.U095[8].P_kW   := 1748.5;   Table.U095[8].Qmax_kVar  := 2760.0;
+   Table.U095[9].P_kW   := 1967.0;   Table.U095[9].Qmax_kVar  := 2760.0;
+   Table.U095[10].P_kW  := 2185.6;   Table.U095[10].Qmax_kVar := 2760.0;
+   Table.U095[11].P_kW  := 2404.1;   Table.U095[11].Qmax_kVar := 2760.0;
+   Table.U095[12].P_kW  := 2622.7;   Table.U095[12].Qmax_kVar := 2760.0;
+   Table.U095[13].P_kW  := 2841.2;   Table.U095[13].Qmax_kVar := 2760.0;
+   Table.U095[14].P_kW  := 3059.8;   Table.U095[14].Qmax_kVar := 2760.0;
+   Table.U095[15].P_kW  := 3278.3;   Table.U095[15].Qmax_kVar := 2760.0;
+   Table.U095[16].P_kW  := 3496.9;   Table.U095[16].Qmax_kVar := 2622.7;
+   Table.U095[17].P_kW  := 3715.5;   Table.U095[17].Qmax_kVar := 2302.6;
+   Table.U095[18].P_kW  := 3934.0;   Table.U095[18].Qmax_kVar := 1905.3;
+   Table.U095[19].P_kW  := 4152.6;   Table.U095[19].Qmax_kVar := 1364.9;
+   Table.U095[20].P_kW  := 4371.1;   Table.U095[20].Qmax_kVar :=    0.0;
+
+   // ── U = 1.00–1.15 p.u. Un  (Pmax = 4600.0 kW per inverter) ───────────────
+   // Datasheet confirms this curve is valid across the entire 1.00–1.15 p.u. range.
+   // Voltages above 0.95 p.u. use this bin (no additional headroom above nominal).
+   Table.U100[0].P_kW   :=    0.0;   Table.U100[0].Qmax_kVar  := 2760.0;
+   Table.U100[1].P_kW   :=  230.0;   Table.U100[1].Qmax_kVar  := 2760.0;
+   Table.U100[2].P_kW   :=  460.0;   Table.U100[2].Qmax_kVar  := 2760.0;
+   Table.U100[3].P_kW   :=  690.0;   Table.U100[3].Qmax_kVar  := 2760.0;
+   Table.U100[4].P_kW   :=  920.0;   Table.U100[4].Qmax_kVar  := 2760.0;
+   Table.U100[5].P_kW   := 1150.0;   Table.U100[5].Qmax_kVar  := 2760.0;
+   Table.U100[6].P_kW   := 1380.0;   Table.U100[6].Qmax_kVar  := 2760.0;
+   Table.U100[7].P_kW   := 1610.0;   Table.U100[7].Qmax_kVar  := 2760.0;
+   Table.U100[8].P_kW   := 1840.0;   Table.U100[8].Qmax_kVar  := 2760.0;
+   Table.U100[9].P_kW   := 2070.0;   Table.U100[9].Qmax_kVar  := 2760.0;
+   Table.U100[10].P_kW  := 2300.0;   Table.U100[10].Qmax_kVar := 2760.0;
+   Table.U100[11].P_kW  := 2530.0;   Table.U100[11].Qmax_kVar := 2760.0;
+   Table.U100[12].P_kW  := 2760.0;   Table.U100[12].Qmax_kVar := 2760.0;
+   Table.U100[13].P_kW  := 2990.0;   Table.U100[13].Qmax_kVar := 2760.0;
+   Table.U100[14].P_kW  := 3220.0;   Table.U100[14].Qmax_kVar := 2760.0;
+   Table.U100[15].P_kW  := 3450.0;   Table.U100[15].Qmax_kVar := 2760.0;
+   Table.U100[16].P_kW  := 3680.0;   Table.U100[16].Qmax_kVar := 2760.0;
+   Table.U100[17].P_kW  := 3910.0;   Table.U100[17].Qmax_kVar := 2423.2;
+   Table.U100[18].P_kW  := 4140.0;   Table.U100[18].Qmax_kVar := 2005.1;
+   Table.U100[19].P_kW  := 4370.0;   Table.U100[19].Qmax_kVar := 1436.3;
+   Table.U100[20].P_kW  := 4600.0;   Table.U100[20].Qmax_kVar :=    0.0;
+
+END_DATA_BLOCK

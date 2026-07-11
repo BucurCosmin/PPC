@@ -1,0 +1,14 @@
+TYPE "UDT_SMA_QTable"
+VERSION : 0.1
+// P-Q capability table for one inverter type, at four grid voltage bins.
+// Each bin holds 21 rows sorted by ascending P_kW (P=0 at index 0, Pmax at index 20).
+// Qmax is symmetric: both overexcited (+) and underexcited (–) limits equal Qmax_kVar.
+// Interpolation: piecewise-linear on P-axis within each bin;
+//               linear between bins on U-axis (0.85↔0.90, 0.90↔0.95, ≥0.95 → U100).
+   STRUCT
+      U085 : Array[0..20] of "UDT_SMA_QRow";   // Ugrid = 0.85 p.u. Un
+      U090 : Array[0..20] of "UDT_SMA_QRow";   // Ugrid = 0.90 p.u. Un
+      U095 : Array[0..20] of "UDT_SMA_QRow";   // Ugrid = 0.95 p.u. Un
+      U100 : Array[0..20] of "UDT_SMA_QRow";   // Ugrid = 1.00–1.15 p.u. Un (flat across range)
+   END_STRUCT;
+END_TYPE

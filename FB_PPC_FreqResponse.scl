@@ -7,19 +7,17 @@
 //   Called from FB_PPC_Controller step ④, AFTER FC_PPC_RampControl.
 //   Droop correction is added POST-ramp so frequency response is never rate-limited.
 //
-// DROOP FORMULA (Art. 114–115, Art. 118–120):
-//   dP = -(2 × Pn_kW × df) / Droop_pct        [kW]
+// DROOP FORMULA (Art. 114–115 OF / Art. 118–120 UF):
+//   df > 0 (over-freq):  dP = -(2 × Pn_kW × df) / Droop_OF_pct   [kW, reduces P]
+//   df < 0 (under-freq): dP = -(2 × Pn_kW × df) / Droop_UF_pct   [kW, increases P]
 //   where  Pn_kW = Pn_MW × 1000,  df = f_active − f_nom  [Hz]
-//   Over-frequency → negative dP (reduce P)
-//   Under-frequency → positive dP (increase P)
 //   Dead band: |df| ≤ DeadBand_mHz / 1000 → dP = 0 (no response inside dead band)
 //   Art.117 sub-test: set DeadBand_mHz = 0 via SCADA to verify response at df = 50 mHz.
 //
 // DYNAMIC PMIN/PMAX BAND (Note 1 of ISCE test program):
-//   dP_at_200mHz = (2 × Pn_kW × 0.200) / Droop_pct   [headroom at 200 mHz reference]
-//   Pmin_active  = Pmin_stab + dP_at_200mHz
-//   Pmax_active  = Pmax_disp − dP_at_200mHz
-//   Ensures full ±200 mHz droop response fits in operable band without saturation.
+//   dP_at_200mHz_OF = (2 × Pn_kW × 0.200) / Droop_OF_pct  → Pmax_active = Pmax_disp − dP_OF
+//   dP_at_200mHz_UF = (2 × Pn_kW × 0.200) / Droop_UF_pct  → Pmin_active = Pmin_stab + dP_UF
+//   Ensures full ±200 mHz droop headroom in both directions without saturation.
 //   Recomputed every cycle — tracks irradiance changes via Pmax_disp = PmaxPlant.
 //
 // TRIP (Art. 118–120):
@@ -69,8 +67,11 @@ VAR_INPUT
     // SCADA-configurable DB parameter — do not hardcode.
     Pn_MW                : REAL;
 
-    // Droop setting in %. ISCE tests at 8.0 and 10.0. Must be SCADA-writable.
-    Droop_pct            : REAL;
+    // Over-frequency droop in % (Art. 114-115). ISCE tests at 8.0. Must be SCADA-writable.
+    Droop_OF_pct         : REAL;
+
+    // Under-frequency droop in % (Art. 118-120). ISCE tests at 10.0. Must be SCADA-writable.
+    Droop_UF_pct         : REAL;
 
     // Dead band in mHz. Default 200. Set to 0 for Art.117 fine-response sub-test.
     // Hard cutout — NOT a soft blend (test explicitly verifies hard boundary).
@@ -138,7 +139,8 @@ VAR_TEMP
     f_active             : REAL;   // Hz, selected frequency (real or test-bench)
     df                   : REAL;   // Hz, deviation from nominal
     Pn_kW                : REAL;   // kW, Pn_MW × 1000 for formula
-    dP_at_200mHz         : REAL;   // kW, headroom reservation at 200 mHz reference
+    dP_at_200mHz_OF      : REAL;   // kW, OF headroom at 200 mHz (Droop_OF_pct)
+    dP_at_200mHz_UF      : REAL;   // kW, UF headroom at 200 mHz (Droop_UF_pct)
     ReconnEnable_Rising  : BOOL;   // Rising edge of Reconnect_Enable
     P_cmd_raw            : REAL;   // kW, P_setpoint_ext + dP_droop before band clamp
 END_VAR
@@ -156,15 +158,21 @@ BEGIN
     #Pn_kW := #Pn_MW * 1000.0;
 
     // ── Dynamic Pmin/Pmax band (Note 1, ISCE test program) ───────────────────
-    // Reserve headroom = full droop response at 200 mHz reference deviation.
-    // Recomputed every cycle so it tracks Pmax_disp (irradiance) and Droop_pct changes.
-    IF #Droop_pct > 0.0 THEN
-        #dP_at_200mHz := (2.0 * #Pn_kW * 0.200) / #Droop_pct;
+    // OF and UF droops are different (Art. 114-115 vs Art. 118-120), so each
+    // direction reserves its own headroom at the 200 mHz reference deviation.
+    // Recomputed every cycle — tracks irradiance (Pmax_disp) and droop changes.
+    IF #Droop_OF_pct > 0.0 THEN
+        #dP_at_200mHz_OF := (2.0 * #Pn_kW * 0.200) / #Droop_OF_pct;
     ELSE
-        #dP_at_200mHz := 0.0;
+        #dP_at_200mHz_OF := 0.0;
     END_IF;
-    #Pmin_active := #Pmin_stab + #dP_at_200mHz;
-    #Pmax_active := #Pmax_disp - #dP_at_200mHz;
+    IF #Droop_UF_pct > 0.0 THEN
+        #dP_at_200mHz_UF := (2.0 * #Pn_kW * 0.200) / #Droop_UF_pct;
+    ELSE
+        #dP_at_200mHz_UF := 0.0;
+    END_IF;
+    #Pmin_active := #Pmin_stab + #dP_at_200mHz_UF;
+    #Pmax_active := #Pmax_disp - #dP_at_200mHz_OF;
 
     // Safety: if Pmax_disp is too low to hold the headroom, collapse band to [0, Pmax_disp]
     IF #Pmin_active >= #Pmax_active THEN
@@ -204,22 +212,34 @@ BEGIN
             // Inside dead band: no droop response (hard cutout)
             #dP_droop := 0.0;
         ELSE
-            // Outside dead band: apply droop
-            // Over-frequency (df > 0) → dP < 0 (reduce P)
-            // Under-frequency (df < 0) → dP > 0 (increase P)
-            IF #Droop_pct > 0.0 THEN
-                #dP_droop := -(2.0 * #Pn_kW * #df) / #Droop_pct;
+            // Outside dead band: apply directional droop (Art. 114-115 OF / Art. 118-120 UF)
+            // Over-frequency  (df > 0) → dP < 0 → reduce P, use Droop_OF_pct
+            // Under-frequency (df < 0) → dP > 0 → increase P, use Droop_UF_pct
+            IF #df > 0.0 THEN
+                IF #Droop_OF_pct > 0.0 THEN
+                    #dP_droop := -(2.0 * #Pn_kW * #df) / #Droop_OF_pct;
+                ELSE
+                    #dP_droop := 0.0;
+                END_IF;
             ELSE
-                #dP_droop := 0.0;
+                IF #Droop_UF_pct > 0.0 THEN
+                    #dP_droop := -(2.0 * #Pn_kW * #df) / #Droop_UF_pct;
+                ELSE
+                    #dP_droop := 0.0;
+                END_IF;
             END_IF;
         END_IF;
 
         // Apply droop correction and clamp to dynamic band
         #P_cmd_raw := #P_setpoint_ext + #dP_droop;
 
-        IF #P_cmd_raw < #Pmin_active THEN
-            #P_setpoint_final := #Pmin_active;
-        ELSIF #P_cmd_raw > #Pmax_active THEN
+        // Upper clamp: Pmax_active = Pmax_disp - dP_at_200mHz reserves headroom
+        // for over-frequency response. Prevents commanding above available capacity.
+        // Lower clamp: none — Pmin_active is a diagnostic output only (ISCE Note 1
+        // headroom band). Enforcing it here created a forced 2400 kW floor that
+        // prevented zero-P curtailment. The droop formula already adds dP when
+        // under-frequency occurs, pulling P up from any operating point naturally.
+        IF #P_cmd_raw > #Pmax_active THEN
             #P_setpoint_final := #Pmax_active;
         ELSE
             #P_setpoint_final := #P_cmd_raw;
