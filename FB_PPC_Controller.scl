@@ -20,13 +20,16 @@
 //
 // PRECONDITION — caller (OB30) must run BEFORE this FB (single call):
 //   "FC_SkidElectricStatus"(
-//       Skid1  := "PPC_Controller".Skids[0],
-//       Skid2  := "PPC_Controller".Skids[1],
+//       Skid1  := "FB_PPC_Controller_DB".Skids[0],
+//       Skid2  := "FB_PPC_Controller_DB".Skids[1],
 //       ...
-//       Skid10 := "PPC_Controller".Skids[9]
+//       Skid10 := "FB_PPC_Controller_DB".Skids[9]
 //   );
+//   Skids[] lives in this FB's instance DB (FB_PPC_Controller_DB), NOT in the
+//   global "PPC_Controller" DB (DB39). Replace "FB_PPC_Controller_DB" with
+//   whatever name was assigned to this FB's IDB in TIA Portal if different.
 //   DI tags (e.g. "Skid1_sep_cel_1") are read directly from the Default tag
-//   table inside the FC — no wiring needed at the call site for those signals.
+//   table inside FC_SkidElectricStatus — no wiring needed at the call site.
 //   Skids lives in the PPC_Controller instance DB (static section below) —
 //   no separate SKID_ELECTRIC global DB is required.
 //
@@ -195,9 +198,9 @@ VAR
     // Previous Enabled state per inverter — for ErrClr re-send on re-enable (M6).
     PrevEnabled_Arr : Array[0..9] of BOOL;
 
-    // Switchgear electric status — written by FC_SkidElectricStatus calls in OB30.
-    // OB30 call: "FC_SkidElectricStatus"(Skid := "PPC_Controller".Skids[i]);
-    // Lives here so no separate global DB is needed.
+    // Switchgear electric status — written by FC_SkidElectricStatus calls in OB30
+    // via "FB_PPC_Controller_DB".Skids[0..9]. Lives here (not in global DB39) so
+    // no separate global DB is needed. Passed to FC_PPC_InverterMonitor as SkidElectric.
     Skids : Array[0..9] of "Skid_Electric_Status";
 
     // Multi-instance FBs — instance data stored within this FB's own IDB.

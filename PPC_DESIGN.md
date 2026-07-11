@@ -292,7 +292,7 @@ Overrides setpoints for faulted / FALLBACK / disconnected inverters. Maintains `
 | Signal | Register format | PLC unit | Conversion |
 |---|---|---|---|
 | WAval, VArAval | S32, FIX4, pu | pu×10000 | ÷10000 × WRtg_kW → kW/kVAr |
-| Wactive, Qactive | S32, FIX4, pu | pu×10000 | ÷10000 × WRtg_kW → kW/kVAr |
+| Wactive, Qactive | S32, FIX0, kW/kVAr | direct kW/kVAr | read from InvMs.TotW / TotVAr (monitoring only — not used in control computations) |
 | WSpt | S32, FIX0, kW | kW | direct integer |
 | VArSpt | S32, FIX0, kVAr | kVAr | direct integer |
 | PFSpt | S32, FIX4 | — | PF × 10000 (0.950 → 9500) |

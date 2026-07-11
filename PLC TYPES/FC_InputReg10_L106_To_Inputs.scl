@@ -1,0 +1,221 @@
+﻿FUNCTION "FC_InputReg10_L106_To_Inputs" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      Reg : Array[0..200] of Word;
+   END_VAR
+
+   VAR_IN_OUT 
+      Inps : "Skid_Parameters_Inputs";
+      Inv : "Sunny_inverter";
+   END_VAR
+
+   VAR_TEMP 
+      si16 : Int;
+      ui16 : UInt;
+      di32 : DInt;
+      du32 : UDInt;
+   END_VAR
+
+
+BEGIN
+	    // 10..11  DcMs.TotWatt (S32 FIX0) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[0], LoWord := #Reg[1]);
+	    #Inps."DcMs.TotWatt" := #di32;
+	    
+	    // 12..13  InvMs.DclVol.Stk1 (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[2], LoWord := #Reg[3]);
+	    #Inps."InvMs.DclVol.Stk1" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 14..15  InvMs.DclVol.Stk2 (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[4], LoWord := #Reg[5]);
+	    #Inps."InvMs.DclVol.Stk2" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 16..17  InvMs.DclVol.Stk3 (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[6], LoWord := #Reg[7]);
+	    #Inps."InvMs.DclVol.Stk3" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 18..19  InvMs.TotA.PhsA (S32 FIX0) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[8], LoWord := #Reg[9]);
+	    #Inps."InvMs.TotA.PhsA" := #di32;
+	    
+	    // 22..23  InvMs.TotA.PhsC (S32 FIX0) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[12], LoWord := #Reg[13]);
+	    #Inps."InvMs.TotA.PhsC" := #di32;
+	    
+	    // 24..25  InvMs.PF (S32 FIX4 /10000) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[14], LoWord := #Reg[15]);
+	    #Inps."InvMs.PF" := DINT_TO_REAL(#di32) / 10000.0;
+	    
+	    // 26..27  InvMs.TotVA (S32 FIX0) -> DInt (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[16], LoWord := #Reg[17]);
+	    #Inv."InvMs.TotVA" := #di32;
+	    
+	    // 28..29  InvMs.TotW (S32 FIX0) -> DInt (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[18], LoWord := #Reg[19]);
+	    #Inv."InvMs.TotW" := #di32;
+	    
+	    // 30..31  InvMs.TotVAr (S32 FIX0) -> DInt (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[20], LoWord := #Reg[21]);
+	    #Inv."InvMs.TotVAr" := #di32;
+	    
+	    // 32..33  GriMs.V.PhsAB (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[22], LoWord := #Reg[23]);
+	    #Inps."GriMs.V.PhsAB" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 34..35  GriMs.V.PhsBC (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[24], LoWord := #Reg[25]);
+	    #Inps."GriMs.V.PhsBC" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 36..37  GriMs.V.PhsCA (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[26], LoWord := #Reg[27]);
+	    #Inps."GriMs.V.PhsCA" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 38..39  GriMs.Hz (S32 FIX2 /100) -> Real (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[28], LoWord := #Reg[29]);
+	    #Inv."GriMs.Hz" := DINT_TO_REAL(#di32) / 100.0;
+	    
+	    // 40..41  TmpCab.Acc (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[30], LoWord := #Reg[31]);
+	    #Inps."TmpCab.Acc" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 42..43  TmpCab.Dcc (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[32], LoWord := #Reg[33]);
+	    #Inps."TmpCab.Dcc" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 44..45  TmpCab.Rio (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[34], LoWord := #Reg[35]);
+	    #Inps."TmpCab.Rio" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 46..47  TmpCab.Max (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[36], LoWord := #Reg[37]);
+	    #Inps."TmpCab.Max" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 48..49  TmpStk.IgbtMax (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[38], LoWord := #Reg[39]);
+	    #Inps."TmpStk.IgbtMax" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 50..51  TmpStk.PcbMax (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[40], LoWord := #Reg[41]);
+	    #Inps."TmpStk.PcbMax" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 52..53  TmpExl (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[42], LoWord := #Reg[43]);
+	    #Inps."TmpExl" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 54..55  TmpTrf (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[44], LoWord := #Reg[45]);
+	    #Inps."TmpTrf" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 56..57  DcSw1Stt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[46], LoWord := #Reg[47]);
+	    #Inps."DcSw1Stt" := #di32;
+	    
+	    // 58..59  DcSw2Stt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[48], LoWord := #Reg[49]);
+	    #Inps."DcSw2Stt" := #di32;
+	    
+	    // 60..61  DcSw3Stt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[50], LoWord := #Reg[51]);
+	    #Inps."DcSw3Stt" := #di32;
+	    
+	    // 62..63  AcSwStt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[52], LoWord := #Reg[53]);
+	    #Inps."AcSwStt" := #di32;
+	    
+	    // 66..67  CapacSwStt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[56], LoWord := #Reg[57]);
+	    #Inps."CapacSwStt" := #di32;
+	    
+	    // 68..69  PrchrgSwStt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[58], LoWord := #Reg[59]);
+	    #Inps."PrchrgSwStt" := #di32;
+	    
+	    // 70..71  Cnt.TotFeedTm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[60], LoWord := #Reg[61]);
+	    #Inps."Cnt.TotFeedTm" := #di32;
+	    
+	    // 72..73  Cnt.TotOpTm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[62], LoWord := #Reg[63]);
+	    #Inps."Cnt.TotOpTm" := #di32;
+	    
+	    // 74..75  Cnt.TotWatthIn (S32 FIX2 /100) -> Real (MWh)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[64], LoWord := #Reg[65]);
+	    #Inps."Cnt.TotWatthIn" := DINT_TO_REAL(#di32) / 100.0;
+	    
+	    // 76..77  Cnt.TotWhOut (S32 FIX2 /100) -> Real (MWh)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[66], LoWord := #Reg[67]);
+	    #Inps."Cnt.TotWhOut" := DINT_TO_REAL(#di32) / 100.0;
+	    
+	    // 78..79  Cnt.WatthIn (S32 FIX2 /100) -> Real (MWh)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[68], LoWord := #Reg[69]);
+	    #Inps."Cnt.WatthIn" := DINT_TO_REAL(#di32) / 100.0;
+	    
+	    // 80..81  Cnt.WhOut (S32 FIX2 /100) -> Real (MWh)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[70], LoWord := #Reg[71]);
+	    #Inps."Cnt.WhOut" := DINT_TO_REAL(#di32) / 100.0;
+	    
+	    // 82..83  Cnt.FanCab1Tm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[72], LoWord := #Reg[73]);
+	    #Inps."Cnt.FanCab1Tm" := #di32;
+	    
+	    // 84..85  Cnt.FanCab2Tm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[74], LoWord := #Reg[75]);
+	    #Inps."Cnt.FanCab2Tm" := #di32;
+	    
+	    // 86..87  Cnt.FanStkTm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[76], LoWord := #Reg[77]);
+	    #Inps."Cnt.FanStkTm" := #di32;
+	    
+	    // 88..89  Cnt.HtCabTm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[78], LoWord := #Reg[79]);
+	    #Inps."Cnt.HtCabTm" := #di32;
+	    
+	    // 90..91  Cnt.HtLoExlTmpTm (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[80], LoWord := #Reg[81]);
+	    #Inps."Cnt.HtLoExlTmpTm" := #di32;
+	    
+	    // 100..101  Rio.KeySw (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[90], LoWord := #Reg[91]);
+	    #Inps."Rio.KeySw" := #di32;
+	    
+	    // 102..103  WaitGriTm (S32 FIX1 /10) -> Real (s)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[92], LoWord := #Reg[93]);
+	    #Inps."WaitGriTm" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 104..105  DevInf.SerNo (U32 FIX0) -> DInt
+	    #di32 := "FC_U32_BE_FromWords"(HiWord := #Reg[94], LoWord := #Reg[95]);
+	    #Inps."DevInf.SerNo" := #di32;
+	    
+	    // 106..107  GfdiSwStt (S32 ENUM) -> DInt
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[96], LoWord := #Reg[97]);
+	    #Inps."GfdiSwStt" := #di32;
+	    
+	    // 108..109  WSpt (S32 FIX0) -> DInt (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[98], LoWord := #Reg[99]);
+	    //#Inv."WSpt" := #di32;
+	    #Inps.WSpt_Fdbk := #di32;
+	    
+	    //#du32 := "FC_U32_BE_FromWords"(HiWord := #Reg[88], LoWord := #Reg[89]);
+	    //#Inv.OpStt := #du32;
+	    #Inv.ErrLcn := "FC_U32_BE_FromWords"(HiWord := #Reg[82], LoWord := #Reg[83]);
+	    #Inv.ErrStt := "FC_S32_BE_FromWords"(HiWord := #Reg[84], LoWord := #Reg[85]);
+	    #Inv.ErrNo := "FC_U32_BE_FromWords"(HiWord := #Reg[86], LoWord := #Reg[87]);
+	    #Inv.OpStt := "FC_S32_BE_FromWords"(HiWord := #Reg[88], LoWord := #Reg[89]);
+	    
+	    
+	    // 110..111  VAMaxSpt (S32 FIX1 /10) -> Real
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[100], LoWord := #Reg[101]);
+	    #Inps."VAMaxSpt" := DINT_TO_REAL(#di32) / 10.0;
+	    
+	    // 112..113  VArSpt (S32 FIX0) -> DInt (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[102], LoWord := #Reg[103]);
+	    //#Inv."VArSpt" := #di32;
+	    #Inps.VarSpt_Fdbk := #di32;
+	    
+	    // 114..115  PFSpt (S32 FIX4 /10000) -> Real (in inverter UDT)
+	    #di32 := "FC_S32_BE_FromWords"(HiWord := #Reg[104], LoWord := #Reg[105]);
+	    //#Inv."PFSpt" := DINT_TO_REAL(#di32) / 10000.0;
+	    #Inps.PFSpt_Fdbk := DINT_TO_REAL(#di32) / 10000.0;
+END_FUNCTION
+

@@ -95,6 +95,9 @@ VERSION : 0.1
       ActErrLcn9 : DInt;
       ActErrNo10 : DInt;
       ActErrLcn10 : DInt;
+      WSpt_Fdbk : DInt;
+      VarSpt_Fdbk : DInt;
+      PFSpt_Fdbk : Real;
    END_STRUCT;
 
 END_TYPE

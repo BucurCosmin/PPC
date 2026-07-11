@@ -99,12 +99,19 @@ BEGIN
     // =========================================================================
 
     // ── RemReady — derived from OpStt ENUM ───────────────────────────────────
-    // 307 = Ok (standby, ready to operate)
-    // 308 = Operation (producing)
-    // 309 = Derating (producing at reduced power)
-    // All other values (303 Stop, 35 Error, etc.) → FALSE
+    // Source: SMA Modbus map Input Reg 98, Unique ID (OpStt).
+    // Values below = inverter is grid-connected and accepting remote control:
+    //   3526 = GridFeed    — producing power normally
+    //   3527 = FRT         — fault ride-through active (still connected)
+    //   3529 = QonDemand   — reactive-only mode (P=0 but Q controllable)
+    //   3530 = RampDown    — controlled ramp-down (still connected)
+    // All other values (381=Stop, 1392=Error, 1394=WaitAC, 3528=Standby, etc.) → FALSE.
+    // NOTE: 307/308/309 are InvOpMod/RemRdy write codes — they are NOT valid OpStt values.
     #opStt := #SkidInverter.OpStt;
-    #Inverter.RemReady := (#opStt = 307) OR (#opStt = 308) OR (#opStt = 309);
+    #Inverter.RemReady := (#opStt = 3526)   // GridFeed
+                       OR (#opStt = 3527)   // FRT
+                       OR (#opStt = 3529)   // QonDemand
+                       OR (#opStt = 3530);  // RampDown
 
     // ── Error — derived from ErrStt ENUM ─────────────────────────────────────
     // 307 = Ok (no fault).  Any other value = fault active.
