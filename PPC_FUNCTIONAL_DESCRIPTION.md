@@ -85,13 +85,20 @@ The 10 inverters are `PPC_Inverters: Array[0..9] of Inverter_controller` in DB39
 | OFRT_Trip_Hz | ④ | 51.5 | Hz, over-frequency trip |
 | UFRT_Trip_Hz | ④ | 47.5 | Hz, under-frequency trip |
 | Reconnect_Enable | ④ | — | Clears freq trip latch (operator) |
-| VArControl_Mode | ⑤ | 0 | 0=fixed Q, 1=U droop, 2=off |
-| U_setpoint_ext | ⑤ | — | kV, voltage setpoint for U droop |
-| U_Droop_pct | ⑤ | 5.0 | %, voltage droop gain |
-| Q_Ramp_Rate_fast | ⑤ | — | kVAr/s fast ramp (ISCE Test 6) |
+| VArControl_Mode | ⑤ | 0 | 0=fixed Q, 1=U droop, 2=off, 3=U Control PID |
+| U_setpoint_ext | ⑤ | — | kV, voltage setpoint — modes 1 (droop) and 3 (PID) |
+| U_Droop_pct | ⑤ | 5.0 | %, voltage droop bandwidth — mode 1 only |
+| Q_Ramp_Rate_fast | ⑤ | — | kVAr/s fast ramp (ISCE Test 6) — bypassed in mode 3 |
 | Q_Ramp_Rate_slow | ⑤ | — | kVAr/s slow ramp (ISCE Test 6) |
 | Q_Ramp_Fast_Sel | ⑤ | FALSE | FALSE=slow, TRUE=fast |
 | U_nom_kV | ⑤ | 110.0 | kV, POC nominal voltage — U_pu = U_meas / U_nom_kV (SMA envelope) |
+| U_Kp | ⑤ | 2000.0 | kVAr/kV, PID proportional gain (mode 3) |
+| U_Ki | ⑤ | 100.0 | kVAr/(kV·s), PID integral gain — Ti = 20 s (mode 3) |
+| U_Kd | ⑤ | 0.0 | kVAr·s/kV, PID derivative gain — 0 = disabled (mode 3) |
+| U_Kd_Tfilt | ⑤ | 0.5 | s, first-order low-pass filter time constant for derivative term |
+| U_deadband_kV | ⑤ | 0.3 | kV, symmetric voltage deadband around setpoint (mode 3) |
+| U_Tt | ⑤ | 20.0 | s, anti-windup tracking time constant (= Ti for PI) |
+| PID_Reset | ⑤ | — | Write TRUE to reset integrator; FB_PPC_Controller auto-clears same cycle |
 
 ### UDT — Inverter_controller
 
@@ -282,9 +289,9 @@ Trip clears: `Reconnect_Enable` rising edge AND f back in normal band.
 ### ⑤ FB_PPC_QCapability — ANRE Ordinul 51/2019
 
 **Purpose:** Generates plant-level Q command through three sequential stages:
-1. Control mode → raw Q command (fixed-Q or U-droop)
-2. Q ramp rate limiting
-3. P-Q capability envelope clamp
+1. Control mode → raw Q command (fixed-Q, U-droop, or U-Control PID)
+2. Q ramp rate limiting (bypassed in mode 3 — PID's Ki already limits rate)
+3. P-Q capability envelope clamp (also used as saturation limits for PID anti-windup)
 
 Output `Q_final_kVAr` feeds step ⑦.
 
@@ -333,6 +340,35 @@ Q_command = (dU_pu / (U_Droop_pct / 100)) × QmaxPlant
 Gain is adaptive — scales with actual available Q capacity (`QmaxPlant` from step ①). Ramp applied. P-Q clamped.
 
 **Mode 2 — Off:** `Q_command = 0`. Used when `Plant_VArMode = 2` (PF mode in ReactiveControl).
+
+**Mode 3 — U Control PID (closed-loop voltage regulation):**
+
+PI(D) controller that drives `U_meas` toward `U_setpoint_ext` by adjusting reactive output. Starting values derived from grid SSC = 700 MVA at 110 kV (SCR ≈ 15).
+
+```
+Sign convention: positive Q = inductive (absorbs VARs → decreases voltage)
+                 negative Q = capacitive (injects VARs → increases voltage)
+
+U_err    = U_meas − U_setpoint_ext           // positive → over-voltage → need +Q (inductive)
+           zeroed if |U_err| < U_deadband_kV
+
+Q_unsat  = U_Kp × U_err + I_term + D_term
+
+// Anti-windup: back-calculation tracks Q capability limits each scan
+I(k+1) = I(k) + U_Ki × U_err × dt + (dt/U_Tt) × (Q_sat − Q_unsat)
+
+// Derivative on measurement (avoids setpoint-step kick), IIR-filtered:
+D_filt(k+1) = D_filt(k) + (dt/U_Kd_Tfilt) × (−dU_meas/dt − D_filt(k))
+D_term      = U_Kd × D_filt
+```
+
+**Saturation:** Q_unsat clamped to `[−Q_ind_interp, +Q_cap_interp]` (Stage 1 P-Q capability limits, computed dynamically each scan).
+
+**Bumpless transfer into mode 3:** `I_init = Ramps_Qcmd − U_Kp × (U_meas − U_setpoint_ext)` — output continuity on mode switch.
+
+**Ramp bypass:** In mode 3 `Ramps_Qcmd := Q_command` (tracks PID output for bumpless handover when switching back to modes 0/1).
+
+**PID reset conditions:** integrator cleared when Plant_Mode = FALLBACK, N_Online = 0, or SCADA writes `PID_Reset = TRUE`.
 
 #### Q ramp logic (ISCE Test 6)
 
@@ -562,7 +598,7 @@ PrevMode := Plant_Mode;
 | ② | Plant_Mode |
 | ③ | Ramps_Pcmd |
 | ④ | dP_droop, FreqResp_Pmin, FreqResp_Pmax, Trip_FreqFault, Reconnecting, Reconnect_Timer_s |
-| ⑤ | Q_max_inductive, Q_max_capacitive, Q_limited, Ramps_Qcmd (mirror of QCap_IDB.Ramps_Qcmd) |
+| ⑤ | Q_max_inductive, Q_max_capacitive, Q_limited, Ramps_Qcmd (mirror of QCap_IDB.Ramps_Qcmd), SMA_Qmax_plant, Q_SMA_limited, U_error_kV, PID_I_term, PID_saturated, PID_active |
 | ⑧ | AnyFault, AnyDerating, FaultMask |
 
 ---
@@ -596,7 +632,7 @@ ELECTRIC_OK is the **6th condition** in `Inverters[i].Available` (step ①). If 
 | 1 | Import `UDT_PQ_CapPoint`, `Skid_Electric_Status`, `Inverter_controller` | Done |
 | 2 | Import all SCL files as program blocks | Done |
 | 3 | Create `SKID_ELECTRIC` DB: `Skids: Array[0..9] of Skid_Electric_Status` | TIA Portal only |
-| 4 | Add new DB39 fields: f_nom, Pn_MW, **Droop_OF_pct** (8.0), **Droop_UF_pct** (10.0), DeadBand_mHz, Pmin_stab, OFRT/UFRT_Trip_Hz, Reconnect_Enable, VArControl_Mode, **U_nom_kV** (110.0), U_setpoint_ext, U_Droop_pct, Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel, and all diagnostic outputs (SMA_Qmax_plant, Q_SMA_limited) | TIA Portal only |
+| 4 | Add new DB39 fields: f_nom, Pn_MW, **Droop_OF_pct** (8.0), **Droop_UF_pct** (10.0), DeadBand_mHz, Pmin_stab, OFRT/UFRT_Trip_Hz, Reconnect_Enable, VArControl_Mode, **U_nom_kV** (110.0), U_setpoint_ext, U_Droop_pct, Q_Ramp_Rate_fast/slow, Q_Ramp_Fast_Sel, U_Kp (2000.0), U_Ki (100.0), U_Kd (0.0), U_Kd_Tfilt (0.5), U_deadband_kV (0.3), U_Tt (20.0), PID_Reset, and diagnostics (SMA_Qmax_plant, Q_SMA_limited, U_error_kV, PID_I_term, PID_saturated, PID_active) | TIA Portal only |
 | 4a | Import new objects: UDT_SMA_QRow, UDT_SMA_QTable, DB_SMA_SC4600UP (constant DB), FC_SMA_QEnvelope | TIA Portal only |
 | 5 | Configure PQ_Table in QCap instance DB (5 tiers × kVAr values) | Before ISCE Test 8 |
 | 6 | Wire 5 new FB_PPC_Controller inputs in OB30 call (f_meas, Freq_Test_Override, Frequency_Source_Sel, U_meas, P_actual_kW) | Commissioning |
@@ -608,4 +644,4 @@ ELECTRIC_OK is the **6th condition** in `Inverters[i].Available` (step ①). If 
 
 ---
 
-*Document version: 2026-07-11 | Updated: Split Droop_pct → Droop_OF_pct (8%, Art.114-115) + Droop_UF_pct (10%, Art.118-120) per ANRE; dynamic band now uses separate OF/UF headroom. Added Stage 2 SMA physical envelope clamp in QB_PPC_QCapability (FC_SMA_QEnvelope 2D P-U interpolation, Stage 1=ANRE PQ_Table, Stage 2=SMA SC 4600 UP hardware limit). Added U_nom_kV=110.0 kV, SMA_Qmax_plant, Q_SMA_limited to DB39. Added FC_SMA_QEnvelope + DB_SMA_SC4600UP + UDT_SMA_QRow/QTable. Added Sim_Mode PF→Q conversion in FC_PPC_ReactiveControl with SMA envelope clamp. Fixed WRtg_kW=4600, Pn_MW=46. Stage 2 uses P_setpoint_kW (FreqResponse output) not P_actual_kW. | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026*
+*Document version: 2026-07-15 | Updated: Added VArControl_Mode 3 (U Control PID) in FB_PPC_QCapability — PI(D) closed-loop voltage regulator with back-calculation anti-windup, derivative-on-measurement (IIR filtered), symmetric deadband, bumpless transfer, ramp bypass. PID params (U_Kp=2000, U_Ki=100, U_Kd=0, U_Kd_Tfilt=0.5, U_deadband_kV=0.3, U_Tt=20, PID_Reset) moved to PPC_Controller DB for flat SCADA access. PID diagnostics (U_error_kV, PID_I_term, PID_saturated, PID_active) mirrored to DB39. Sign convention: positive Q = inductive. Starting values from SSC=700 MVA at 110 kV. Previous: Split Droop_pct → Droop_OF_pct (8%, Art.114-115) + Droop_UF_pct (10%, Art.118-120); Stage 2 SMA physical envelope clamp; Sim_Mode PF→Q. | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026*

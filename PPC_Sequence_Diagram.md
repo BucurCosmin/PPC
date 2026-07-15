@@ -79,7 +79,7 @@ flowchart TD
         P_LPSP[Increase WSpt above\ninverter minimum threshold]
         P_CALC[①②③ InverterMonitor + ModeManager + RampControl\nRamps_Pcmd = rate-limited AGC Cmd_P\nN_Online, PmaxPlant, QmaxPlant, Available]
         P_FREQ[④ FB_PPC_FreqResponse\ndroop: dP = -2·Pn·df/Droop_pct\ndead band check\nP_final_kW = LIMIT Pmin_active..Pmax_active\nTrip_FreqFault → P=0 + Ramps_Pcmd reset]
-        P_QCAP[⑤ FB_PPC_QCapability\nP-Q table interpolation → Q_max limits\nQ command fixed or U-droop\nQ ramp fast/slow → Q_final_kVAr clamped\nQ_limited diagnostic]
+        P_QCAP[⑤ FB_PPC_QCapability\nP-Q table interpolation → Q_max limits\nQ command: fixed-Q / U-droop / U-Control PID\nQ ramp fast/slow → Q_final_kVAr clamped\nQ_limited / PID_active diagnostics]
         P_DIST[⑥⑦⑧ PowerDistribution + ReactiveControl + FaultHandler\nWSpt proportional P_final_kW by WAval\nVArSpt proportional Q_final_kVAr by VArAval\nOperMode + ErrClr overrides]
     end
 
@@ -199,8 +199,9 @@ PPC ④ (P-f droop — ANRE Art.114–120):
 PPC ⑤ (P-Q capability — ANRE Art.147, 160):
          P_pct = P_actual_kW / (Pn_MW × 1000) × 100
          Interpolate PQ_Table → Q_max_inductive, Q_max_capacitive
-         Q_command from fixed-Q or U-droop (VArControl_Mode)
-         Q ramp applied → Q_final_kVAr clamped to capability envelope
+         Q_command from fixed-Q / U-droop / U-Control PID (VArControl_Mode 0/1/3)
+         Mode 3: PID bypass ramp — Ramps_Qcmd tracks PID output
+         Q ramp applied (modes 0/1) → Q_final_kVAr clamped to capability envelope
 
 PPC ⑥⑦:
          WSpt_i = P_final_kW × (WAval_i / ΣWAval_j)    [kW, per available inverter]
@@ -560,11 +561,12 @@ P_actual_kW, Pmax_kW
       ▼
 PQ_Table interpolation ──► Q_max_inductive, Q_max_capacitive
                                        │
-VArControl_Mode ──► Q_command ──► Q ramp ──► Q_final_kVAr (clamped)
-   0: Q_setpoint_ext                             │
-   1: U-droop calc                               ▼
-   2: 0                              FC_PPC_ReactiveControl
-                                     (distributes Q_final_kVAr per inverter)
+VArControl_Mode ──► Q_command ──────────────────────────────────► Q_final_kVAr (clamped)
+   0: Q_setpoint_ext        │                                           │
+   1: U-droop calc          │ modes 0/1: Q ramp applied                │
+   2: 0                     │ mode 3: Ramps_Qcmd := Q_command           ▼
+   3: PID(U_meas, U_spt) ───┘  (ramp bypass; PID Ki limits rate)  FC_PPC_ReactiveControl
+                                                                   (distributes per inverter)
 ```
 
 ### 14.2 P-Q capability table (ISCE Test 8 — Art. 147, 152)
@@ -635,10 +637,49 @@ Two separate mode selectors serve different purposes:
 | Parameter | Location | Values | Purpose |
 |---|---|---|---|
 | `Plant_VArMode` (Cmd_VArMode) | FB_PPC_Controller input | 0=Off, 1=Q dispatch, 2=PF | How ReactiveControl distributes reactive output to inverters |
-| `VArControl_Mode` | DB39 config | 0=fixed Q, 1=U droop, 2=off | How QCapability computes the plant-level Q command |
+| `VArControl_Mode` | DB39 config | 0=fixed Q, 1=U droop, 2=off, 3=U Control PID | How QCapability computes the plant-level Q command |
 
-Example for U-droop operation: set `Plant_VArMode = 1` (ReactiveControl distributes Q proportionally) AND `VArControl_Mode = 1` (QCapability computes Q from voltage error). For PF mode: `Plant_VArMode = 2` (uniform PF), `VArControl_Mode = 2` (QCapability outputs 0 — bypassed).
+Valid combinations:
+
+| Use case | Plant_VArMode | VArControl_Mode |
+|---|---|---|
+| Fixed Q from SCADA | 1 (Q dispatch) | 0 (fixed Q) |
+| Voltage droop | 1 (Q dispatch) | 1 (U droop) |
+| PF setpoint | 2 (PF) | 2 (off — QCapability bypassed) |
+| U Control PID | 1 (Q dispatch) | 3 (U Control PID) |
+| Reactive off | 0 (Off) | any |
+
+### 14.7 U Control PID (VArControl_Mode = 3)
+
+Closed-loop voltage regulator. Drives `U_meas` toward `U_setpoint_ext` by adjusting Q output. Requires `Plant_VArMode = 1`.
+
+**Sign convention:** positive Q = inductive (absorbs VARs, decreases voltage); negative Q = capacitive (injects VARs, increases voltage).
+
+```
+U_err = U_meas − U_setpoint_ext      // positive → over-voltage → need +Q to push voltage down
+        zeroed if |U_err| < U_deadband_kV
+
+Q_unsat = U_Kp × U_err  +  I_term  +  D_term
+
+Saturation: Q_sat = LIMIT(−Q_ind_interp, Q_unsat, +Q_cap_interp)   // dynamic PQ limits each scan
+PID_saturated = TRUE if Q_sat ≠ Q_unsat
+
+Anti-windup (back-calculation):
+  I(k+1) = I(k) + U_Ki × U_err × dt + (dt/U_Tt) × (Q_sat − Q_unsat)
+
+Derivative on measurement (avoids step kick), IIR-filtered:
+  D_filt(k+1) = D_filt(k) + (dt/U_Kd_Tfilt) × (−dU_meas/dt − D_filt(k))
+  D_term = U_Kd × D_filt    (set U_Kd=0 to disable)
+```
+
+**Starting values** (SSC=700 MVA, 110 kV, SCR≈15): U_Kp=2000 kVAr/kV, U_Ki=100 kVAr/(kV·s), Ti=20 s.
+
+**Bumpless transfer into mode 3:** `I_init = Ramps_Qcmd − U_Kp × U_err` — output continuity on mode switch.
+
+**Ramp bypass in mode 3:** `Ramps_Qcmd := Q_command` each scan (no ramp applied; tracks PID output for bumpless handover when switching back to modes 0/1).
+
+**Diagnostics in DB39:** `U_error_kV`, `PID_I_term`, `PID_saturated`, `PID_active`.
 
 ---
 
-*Document version: 2026-07-03 | Additions: FB_PPC_FreqResponse P-f droop (sections 1, 2, 4, 8, 13), FB_PPC_QCapability P-Q capability + Q ramp (sections 1, 2, 4, 8, 14), call chain updated to 8 steps, Trip_FreqFault and Q_limited interlock rows, Q ramp relocation from ReactiveControl to QCapability | Previous additions: SKID_ELECTRIC interlock, IEC_Watchdog, FB15 6-state FSM write sequence, FC17 race condition fix | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026; MODBUS-SCxxxx-TI-en-19*
+*Document version: 2026-07-15 | Added VArControl_Mode 3 (U Control PID, section 14.7), updated control flow diagram and mode table (14.6) for mode 3, updated step ⑤ Mermaid node. Previous: FB_PPC_FreqResponse P-f droop (sections 1, 2, 4, 8, 13), FB_PPC_QCapability P-Q capability + Q ramp (sections 1, 2, 4, 8, 14), SKID_ELECTRIC interlock, IEC_Watchdog | Source: ANRE Ordinul 51/2019, Ordinul 60/2024; ISCE Program de Probe CEF Tandarei 2026; MODBUS-SCxxxx-TI-en-19*
