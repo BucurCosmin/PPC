@@ -59,13 +59,24 @@ NON_RETAIN
 
       // ── Q capability / voltage control parameters (ANRE Art. 147, 160, 163) ───
       // All SCADA-writable.
-      VArControl_Mode : Int;       // 0=fixed Q, 1=U droop, 2=off  (Q source inside QCapability)
+      VArControl_Mode : Int;       // 0=fixed Q, 1=U droop, 2=off, 3=U Control PID  (Q source inside QCapability)
       U_setpoint_ext : Real;       // kV, MV busbar voltage setpoint for U-droop mode
       U_Droop_pct : Real := 5.0;   // %, voltage droop (default 5%)
       Q_Ramp_Rate_fast : Real;     // kVAr/s, fast Q ramp rate (ISCE Test 6)
       Q_Ramp_Rate_slow : Real;     // kVAr/s, slow Q ramp rate (ISCE Test 6)
       Q_Ramp_Fast_Sel : Bool;      // FALSE=slow ramp, TRUE=fast ramp
       U_nom_kV : Real := 110.0;    // kV, POC nominal voltage — U_pu = U_meas / U_nom_kV for SMA envelope
+
+      // ── U Control (mode 3) tuning — SCADA-writable ──────────────────────────
+      // Starting values derived from grid SSC = 700 MVA, U_nom = 110 kV.
+      // Kp = 0.2 × SSC×1000/U_nom = 2000 kVAr/kV; Ti = 20 s → Ki = Kp/Ti = 100.
+      U_Kp : Real := 2000.0;          // kVAr/kV, proportional gain
+      U_Ki : Real := 100.0;           // kVAr/(kV·s), integral gain (Ti = 20 s)
+      U_Kd : Real := 0.0;             // kVAr·s/kV, derivative gain (0 = disabled)
+      U_Kd_Tfilt : Real := 0.5;       // s, derivative low-pass filter time constant
+      U_deadband_kV : Real := 0.3;    // kV, voltage deadband (±) — covers VT noise + tap steps
+      U_Tt : Real := 20.0;            // s, anti-windup tracking time constant (= Ti)
+      PID_Reset : Bool;               // write TRUE to reset integrator; FB_PPC_Controller auto-clears
 
       // ── Q capability diagnostics (written by FB, SCADA-readable) ─────────────
       Q_max_inductive : Real;      // kVAr, inductive capability at current P (ISCE Test 8)
@@ -74,6 +85,12 @@ NON_RETAIN
       Q_setpoint_final : Real;       // kVAr, Q output after ramp + P-Q clamp (debug mirror)
       SMA_Qmax_plant : Real;        // kVAr, SMA physical Q limit at current P/U (Stage 2, diagnostic)
       Q_SMA_limited : Bool;         // TRUE: Q clamped by SMA physical envelope (Stage 2)
+
+      // ── U Control (mode 3) diagnostics (written by FB, SCADA-readable) ──────
+      U_error_kV : Real;           // kV, voltage error after deadband (sign = U_spt − U_meas)
+      PID_I_term : Real;           // kVAr, integrator accumulator (wind-up visibility)
+      PID_saturated : Bool;        // TRUE: PID output clamped by Q capability limits this scan
+      PID_active : Bool;           // TRUE: VArControl_Mode = 3 executing this scan
 
 
       // ── Operator commands (SCADA-writable) ──────────────────────────────────

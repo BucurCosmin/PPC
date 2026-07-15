@@ -6,7 +6,22 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git config *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import pdfplumber; print\\('ok'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import markdown; print\\('markdown ok'\\)\")",
+      "Bash(python -c \"import weasyprint; print\\('weasyprint ok'\\)\")",
+      "Bash(python -c \"import reportlab; print\\('reportlab ok'\\)\")",
+      "Bash(pandoc --version)",
+      "Bash(python gen_pdf_mapping.py)",
+      "Bash(python gen_pdf_sequence.py)",
+      "Bash(Remove-Item \"c:\\\\Users\\\\cosmi\\\\OneDrive\\\\WORK\\\\PPC_ENERGY\\\\gen_pdf_mapping.py\" -Force)",
+      "Bash(Remove-Item \"c:\\\\Users\\\\cosmi\\\\OneDrive\\\\WORK\\\\PPC_ENERGY\\\\gen_pdf_sequence.py\" -Force)",
+      "Bash(Write-Host \"cleaned\")",
+      "Bash(python -m pip install reportlab --quiet)",
+      "Bash(python gen_routing_pdf.py)",
+      "Bash(python -c \"import os; s=os.path.getsize\\(r'c:\\\\Users\\\\cosmi\\\\OneDrive\\\\WORK\\\\PPC_ENERGY\\\\Write_Sequence_Data_Routing.pdf'\\); print\\(f'{s/1024:.1f} KB'\\)\")"
     ]
   }
 }

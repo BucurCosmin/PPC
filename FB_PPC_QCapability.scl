@@ -115,6 +115,15 @@ VAR_INPUT
     // Grid voltage in per-unit of nominal (U_meas / U_nom_kV).
     // Computed in FB_PPC_Controller before calling this FB. Valid range: 0.85–1.15 p.u.
     U_pu             : REAL;
+
+    // ── U Control (mode 3) tuning — passed from "PPC_Controller" DB (SCADA-writable) ────
+    U_Kp          : REAL;   // kVAr/kV, proportional gain
+    U_Ki          : REAL;   // kVAr/(kV·s), integral gain
+    U_Kd          : REAL;   // kVAr·s/kV, derivative gain (0 = disabled)
+    U_Kd_Tfilt    : REAL;   // s, derivative low-pass filter time constant
+    U_deadband_kV : REAL;   // kV, voltage deadband (±) around setpoint
+    U_Tt          : REAL;   // s, anti-windup tracking time constant
+    PID_Reset     : BOOL;   // TRUE = reset integrator this cycle; FB_PPC_Controller clears it
 END_VAR
 
 VAR_OUTPUT
@@ -140,6 +149,12 @@ VAR_OUTPUT
     // TRUE when Q_setpoint_final was clamped by the SMA physical envelope (Stage 2).
     // Distinct from Q_limited (Stage 1 ANRE table clamp).
     Q_SMA_limited    : BOOL;
+
+    // U Control (mode 3) diagnostics — mirrored to "PPC_Controller" DB by FB_PPC_Controller
+    U_error_kV    : REAL;   // kV, voltage error after deadband applied (sign = U_spt − U_meas)
+    PID_I_term    : REAL;   // kVAr, current integrator value (wind-up visibility)
+    PID_saturated : BOOL;   // TRUE when PID output is clamped by Q capability limits
+    PID_active    : BOOL;   // TRUE when Control_Mode = 3 is executing this scan
 END_VAR
 
 VAR
@@ -158,6 +173,12 @@ VAR
         (P_pct := 75.0,  Q_ind_max := 20000.0, Q_cap_max := 20000.0),
         (P_pct := 100.0, Q_ind_max := 20000.0, Q_cap_max := 20000.0)
     ];
+
+    // ── U Control PID state (retained between scans) ─────────────────────────────────────
+    PID_I         : REAL := 0.0;      // kVAr, integrator accumulator
+    PID_D_filt    : REAL := 0.0;      // kV/s, low-pass filtered derivative of U_meas
+    U_meas_prev   : REAL := 0.0;      // kV, U_meas from previous scan (derivative input)
+    Ctrl_Mode_prv : INT  := 0;        // previous Control_Mode (edge detection)
 END_VAR
 
 VAR_TEMP
@@ -177,6 +198,9 @@ VAR_TEMP
     P_per_inv       : REAL;    // kW, per-inverter active power for SMA envelope lookup
     Qmax_inv        : REAL;    // kVAr, SMA symmetric Q limit for one inverter at current P/U
     SMA_Q_limit     : REAL;    // kVAr, SMA plant-level Q limit (Qmax_inv × N_Online)
+    U_err           : REAL;    // kV, voltage error (may be zeroed by deadband)
+    Q_unsat         : REAL;    // kVAr, PID output before saturation clamp
+    D_term          : REAL;    // kVAr, derivative contribution to PID output
 END_VAR
 
 BEGIN
@@ -213,6 +237,37 @@ BEGIN
     #Q_max_inductive  := #Q_ind_interp;
     #Q_max_capacitive := #Q_cap_interp;
 
+    // ── U Control (mode 3) PID state management ───────────────────────────────
+    // Default diagnostic outputs; mode 3 CASE block overrides when active.
+    #PID_active    := FALSE;
+    #PID_saturated := FALSE;
+    #U_error_kV    := 0.0;
+
+    // Hard resets: FALLBACK, all inverters offline, or SCADA manual reset command.
+    IF #Plant_Mode = 2 OR (#N_Online = 0 AND #Control_Mode = 3) OR #PID_Reset THEN
+        #PID_I       := 0.0;
+        #PID_D_filt  := 0.0;
+        #U_meas_prev := #U_meas;
+        // PID_Reset is VAR_INPUT — cleared by FB_PPC_Controller in "PPC_Controller".PID_Reset
+    END_IF;
+
+    // Mode-change edge: bumpless transfer in/out of mode 3.
+    IF #Control_Mode <> #Ctrl_Mode_prv THEN
+        IF #Control_Mode = 3 THEN
+            // Bumpless transfer INTO mode 3:
+            // Pre-load I so first PID output ≈ current ramp state — no Q jump.
+            // Q_unsat = Kp×e + I  →  I_init = Ramps_Qcmd − Kp×(U_meas − U_spt)
+            #PID_I      := #Ramps_Qcmd - #U_Kp * (#U_meas - #U_setpoint_ext);
+            #PID_D_filt := 0.0;
+        ELSE
+            // Switching away from mode 3: reset PID state cleanly.
+            #PID_I      := 0.0;
+            #PID_D_filt := 0.0;
+        END_IF;
+        #U_meas_prev := #U_meas;
+    END_IF;
+    #Ctrl_Mode_prv := #Control_Mode;
+
     // ── Q command from selected control mode ──────────────────────────────────
     CASE #Control_Mode OF
 
@@ -229,6 +284,58 @@ BEGIN
             ELSE
                 #Q_command := 0.0;
             END_IF;
+
+        3:  // ── Mode 3: U Control — PI(D) voltage regulator ──────────────────
+            // ① Error with symmetric deadband
+            // Convention: positive Q = inductive (absorb) → to raise voltage (U_meas < U_spt)
+            // we need negative Q (capacitive, inject) → error = U_meas − U_spt
+            #U_err := #U_meas - #U_setpoint_ext;
+            IF ABS(#U_err) < #U_deadband_kV THEN
+                #U_err := 0.0;
+            END_IF;
+
+            // ② Derivative on measurement — avoids kick on setpoint step changes.
+            //    First-order IIR: D_filt += (dt/Tfilt) × (−dU_meas/dt − D_filt)
+            IF #U_Kd > 0.0 AND #U_Kd_Tfilt > 0.0 AND #CycleTime_s > 0.0 THEN
+                #PID_D_filt := #PID_D_filt
+                             + (#CycleTime_s / #U_Kd_Tfilt)
+                             * (-(#U_meas - #U_meas_prev) / #CycleTime_s - #PID_D_filt);
+                #D_term     := #U_Kd * #PID_D_filt;
+            ELSE
+                #D_term := 0.0;
+            END_IF;
+            #U_meas_prev := #U_meas;
+
+            // ③ Unsaturated PID output
+            #Q_unsat := #U_Kp * #U_err + #PID_I + #D_term;
+
+            // ④ Saturate to Stage 1 Q capability limits (interpolated at top of FB)
+            IF #Q_unsat > #Q_cap_interp THEN
+                #Q_command    := #Q_cap_interp;
+                #PID_saturated := TRUE;
+            ELSIF #Q_unsat < -#Q_ind_interp THEN
+                #Q_command    := -#Q_ind_interp;
+                #PID_saturated := TRUE;
+            ELSE
+                #Q_command    := #Q_unsat;
+                #PID_saturated := FALSE;
+            END_IF;
+
+            // ⑤ Anti-windup: back-calculation integrator update.
+            //    (Q_command − Q_unsat) = 0 when not saturated → pure Ki×e×dt term.
+            //    When saturated the correction bleed pulls the integrator back toward the limit.
+            IF #U_Tt > 0.0 THEN
+                #PID_I := #PID_I
+                        + #U_Ki * #U_err * #CycleTime_s
+                        + (#CycleTime_s / #U_Tt) * (#Q_command - #Q_unsat);
+            ELSE
+                #PID_I := #PID_I + #U_Ki * #U_err * #CycleTime_s;
+            END_IF;
+
+            // Monitoring outputs
+            #U_error_kV := #U_err;
+            #PID_I_term := #PID_I;
+            #PID_active  := TRUE;
 
     ELSE   // Mode 2 (Off) or unknown: Q = 0
         #Q_command := 0.0;
@@ -258,6 +365,12 @@ BEGIN
         #maxStep    := #Q_ramp_rate * #CycleTime_s;
         #absDelta   := ABS(#delta);
         #Ramps_Qcmd := #Ramps_Qcmd - MIN(IN1 := #absDelta, IN2 := #maxStep);
+    END_IF;
+
+    // In U Control (mode 3): PID Ki already limits rate of change — bypass external ramp.
+    // Ramps_Qcmd tracks PID output so bumpless handover to modes 0/1 stays clean.
+    IF #Control_Mode = 3 THEN
+        #Ramps_Qcmd := #Q_command;
     END_IF;
 
     // ── P-Q capability clamp ──────────────────────────────────────────────────

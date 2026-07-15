@@ -400,9 +400,9 @@ BEGIN
     // =========================================================================
     // ⑤  FB_PPC_QCapability  (P-Q envelope + Q ramp)
     // =========================================================================
-    // Control_Mode (0=fixed Q, 1=U droop, 2=off) is separate from Plant_VArMode
-    // (0=Off, 1=Q dispatch, 2=PF). A caller can set Plant_VArMode=1 and choose
-    // the Q source by setting "PPC_Controller".VArControl_Mode = 0 or 1.
+    // Control_Mode (0=fixed Q, 1=U droop, 2=off, 3=U control PID) is separate from
+    // Plant_VArMode (0=Off, 1=Q dispatch, 2=PF). A caller can set Plant_VArMode=1
+    // and choose the Q source by setting "PPC_Controller".VArControl_Mode = 0/1/3.
     // U_pu: per-unit voltage used by Stage 2 SMA envelope lookup.
     IF "PPC_Controller".U_nom_kV > 0.0 THEN
         #U_pu := #U_meas / "PPC_Controller".U_nom_kV;
@@ -426,9 +426,17 @@ BEGIN
         CycleTime_s      := #CycleTime_s,
         Plant_Mode       := #Plant_Mode,
         N_Online         := #N_Online,
-        U_pu             := #U_pu
+        U_pu             := #U_pu,
+        U_Kp             := "PPC_Controller".U_Kp,
+        U_Ki             := "PPC_Controller".U_Ki,
+        U_Kd             := "PPC_Controller".U_Kd,
+        U_Kd_Tfilt       := "PPC_Controller".U_Kd_Tfilt,
+        U_deadband_kV    := "PPC_Controller".U_deadband_kV,
+        U_Tt             := "PPC_Controller".U_Tt,
+        PID_Reset        := "PPC_Controller".PID_Reset
     );
     #Q_final_kVAr := #QCap_IDB.Q_setpoint_final;
+    "PPC_Controller".PID_Reset := FALSE;   // clear one-shot after FB has processed it
 
     // Mirror QCapability diagnostics to DB (ISCE Test 8/9 acquisition + HMI)
     "PPC_Controller".Q_max_inductive  := #QCap_IDB.Q_max_inductive;
@@ -438,6 +446,10 @@ BEGIN
     "PPC_Controller".Q_setpoint_final := #QCap_IDB.Q_setpoint_final;
     "PPC_Controller".SMA_Qmax_plant   := #QCap_IDB.SMA_Qmax_plant;
     "PPC_Controller".Q_SMA_limited    := #QCap_IDB.Q_SMA_limited;
+    "PPC_Controller".U_error_kV       := #QCap_IDB.U_error_kV;
+    "PPC_Controller".PID_I_term       := #QCap_IDB.PID_I_term;
+    "PPC_Controller".PID_saturated    := #QCap_IDB.PID_saturated;
+    "PPC_Controller".PID_active       := #QCap_IDB.PID_active;
 
 
     // =========================================================================

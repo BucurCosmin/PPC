@@ -112,12 +112,27 @@ Grid-code compliance: ANRE Ordinul 51/2019, ANRE Ordinul 60/2024, Category D.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| VArControl_Mode | Int | 0 | 0=fixed Q, 1=U droop, 2=off (separate from Plant_VArMode) |
-| U_setpoint_ext | Real | — | kV, voltage setpoint for U droop mode |
-| U_Droop_pct | Real | 5.0 | %, voltage droop gain |
-| Q_Ramp_Rate_fast | Real | — | kVAr/s, fast Q ramp (ISCE Test 6) |
+| VArControl_Mode | Int | 0 | 0=fixed Q, 1=U droop, 2=off, 3=U Control PID (separate from Plant_VArMode) |
+| U_setpoint_ext | Real | — | kV, voltage setpoint — used by both U Droop (mode 1) and U Control PID (mode 3) |
+| U_Droop_pct | Real | 5.0 | %, voltage droop bandwidth (mode 1 only) — 5% means full Q at 5% voltage deviation |
+| Q_Ramp_Rate_fast | Real | — | kVAr/s, fast Q ramp (ISCE Test 6) — not used in mode 3 (PID bypasses ramp) |
 | Q_Ramp_Rate_slow | Real | — | kVAr/s, slow Q ramp (ISCE Test 6) |
 | Q_Ramp_Fast_Sel | Bool | — | FALSE=slow, TRUE=fast |
+| U_nom_kV | Real | 110.0 | kV, POC nominal voltage — U_pu = U_meas / U_nom_kV for SMA envelope |
+
+#### U Control PID tuning (mode 3, SCADA-writable)
+
+Starting values derived from grid SSC = 700 MVA at 110 kV (Kp = 0.2 × SSC×1000/U_nom, Ti = 20 s).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| U_Kp | Real | 2000.0 | kVAr/kV, proportional gain |
+| U_Ki | Real | 100.0 | kVAr/(kV·s), integral gain (Ti = 20 s → Ki = Kp/Ti) |
+| U_Kd | Real | 0.0 | kVAr·s/kV, derivative gain (0 = disabled — start here) |
+| U_Kd_Tfilt | Real | 0.5 | s, first-order low-pass filter time constant for derivative term |
+| U_deadband_kV | Real | 0.3 | kV, symmetric voltage deadband around setpoint (covers VT noise + tap steps) |
+| U_Tt | Real | 20.0 | s, anti-windup tracking time constant (= Ti for PI) |
+| PID_Reset | Bool | — | Write TRUE to reset integrator; FB_PPC_Controller auto-clears same cycle |
 
 ### Q capability diagnostics (SCADA-readable, ISCE Test 8/9)
 
@@ -128,7 +143,10 @@ Grid-code compliance: ANRE Ordinul 51/2019, ANRE Ordinul 60/2024, Category D.
 | Q_limited | Bool | TRUE when Q clamped by ANRE P-Q capability envelope (Stage 1) |
 | SMA_Qmax_plant | Real | kVAr, SMA physical Q limit at current P/U (Stage 2 diagnostic) |
 | Q_SMA_limited | Bool | TRUE when Q clamped by SMA physical envelope (Stage 2) |
-| U_nom_kV | Real | kV, POC nominal voltage (110.0) — U_pu = U_meas / U_nom_kV |
+| U_error_kV | Real | kV, voltage error after deadband (U_meas − U_setpoint_ext) — mode 3 diagnostic |
+| PID_I_term | Real | kVAr, integrator accumulator — wind-up visibility for mode 3 |
+| PID_saturated | Bool | TRUE when PID output clamped by Q capability limits — mode 3 diagnostic |
+| PID_active | Bool | TRUE when VArControl_Mode = 3 is executing this scan |
 
 ---
 
