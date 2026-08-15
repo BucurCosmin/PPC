@@ -226,9 +226,11 @@ FB15 `ReadInverterData` uses a `FunctionalStateMachine` with **6 states** per in
 | 1 | READ  | FC03 (mode 103) | 0   | 104 | Holding regs → Inverter UDT + ParamHold |
 | 2 | READ  | FC04 (mode 104) | 10  | 106 | Input regs → ParamInputs + Inverter measurements |
 | 3 | READ  | FC04 (mode 104) | 116 | 112 | Input regs continued → ParamInputs |
-| 4 | WRITE | FC16 (mode 1)   | 0   | 10  | InvOpMod, RemRdy, VArMod, WMod, ErrClr |
-| 5 | WRITE | FC16 (mode 1)   | 108 | 2   | WSpt |
-| 6 | WRITE | FC16 (mode 1)   | 112 | 4   | VArSpt + PFSpt |
+| 4 | WRITE | FC16 (mode 116) | 0   | 10  | InvOpMod, RemRdy, VArMod, WMod, ErrClr |
+| 5 | WRITE | FC16 (mode 116) | 108 | 2   | WSpt |
+| 6 | WRITE | FC16 (mode 116) | 112 | 4   | VArSpt + PFSpt |
+
+> **MB_CLIENT modbusMode encoding:** This MB_CLIENT uses `100 + Modbus FC#` — mode 103 = FC03, mode 104 = FC04, mode 116 = FC16. Using mode 1 instead of 116 caused all FC16 writes to fail silently (wrong function code sent to SMA). Fixed 2026-08-15.
 
 > Regs 110–111 (gap between WSpt and VArSpt) are **not written** — states 5 and 6 are intentionally separate transactions to avoid writing unknown registers.
 
