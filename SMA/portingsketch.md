@@ -16,7 +16,7 @@ Before any code changes, these must be confirmed against the actual v2.0 PDF:
 | Q1 | Are the Unit ID 2 addresses (40022, 40023…) in **1-based** (40001 = first reg) or **0-based** PDU format? | Our MB_CLIENT uses 0-based; wrong address = wrong register |
 | Q2 | Does Unit ID 2 use the **same TCP connection** as Unit ID 3, or does it need a **separate socket**? | Determines if FB16 can reuse one connection or needs two |
 | Q3 | Are Unit ID 3 WSpt (reg 108) and VArSpt (reg 112) still valid write targets in v2.0, or deprecated? | If deprecated, old FSM states 5/6 must be changed entirely |
-| Q4 | What **firmware version** is installed on the SC 4600 UP units on site? | v2.0 requires firmware ≥ 10.03.xx.R |
+| Q4 | ~~What **firmware version** is installed on the SC 4600 UP units on site?~~ **CLOSED — firmware 10.03.14.R confirmed. v2.0 supported.** | v2.0 requires firmware ≥ 10.03.xx.R ✓ |
 | Q5 | WSpt/VArSpt at Unit ID 2 are S16 FIX2 (%). What is the **reference value** (`WExlSpt.RefVal` / `VArExlSpt.RefVal`) read from and at what register address? | Needed to convert kW → % for the write |
 | Q6 | For PF control: v2.0 uses reg 40024 + 40025 at Unit ID 2. Is the existing Unit ID 3 PFSpt (reg 114) still valid? | Affects PF write path |
 | Q7 | Is `VolNomSpt` (Unit ID 2, reg 41263) **needed for U control** (mode 3), or does our existing Q-based PID via VArSpt remain better? | Architecture decision — not just porting |
@@ -194,7 +194,7 @@ Key additions:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Firmware < 10.03.xx.R on site inverters | **CRITICAL** | Check firmware version before any v2.0 write attempt |
+| ~~Firmware < 10.03.xx.R on site inverters~~ | ~~CRITICAL~~ | **CLOSED — 10.03.14.R confirmed** |
 | Unit ID 2 requires separate TCP socket | High | Test with external Modbus tool on UID2 before FB16 changes |
 | FIX2 scaling wrong (100 vs 10000) | High | Verify against PDF + test with small setpoint |
 | Unit ID 3 WSpt/VArSpt deprecated in v2.0 — old states left in FSM | Medium | Test both paths, remove old if confirmed deprecated |
