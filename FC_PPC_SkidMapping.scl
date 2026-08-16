@@ -160,17 +160,24 @@ BEGIN
     // ── Active power control ──────────────────────────────────────────────────
     // WMode ENUM: 1079 = WCtlCom (external setpoint control), 303 = Off
     #SkidInverter."GriMng.WMod" := #Inverter.WMode;
-    // WSpt: active power setpoint in kW (FIX0 — DInt, direct kW value)
-    #SkidInverter.WSpt          := #Inverter.WSpt;
+    // WSpt (v1.9 fallback): kW FIX0 to UID3 reg 108 — keep until v2.0 path validated on HW
+    #SkidInverter.WSpt     := #Inverter.WSpt;
+    // WSpt_pct (v2.0): FIX2 % to UID2 addr 23 — SC 4600 UP reference = 4600 kW
+    #SkidInverter.WSpt_pct := REAL_TO_INT(DINT_TO_REAL(#Inverter.WSpt) / 4600.0 * 10000.0);
 
     // ── Reactive power / power factor control ─────────────────────────────────
     // VArMode ENUM: 1072 = VArCtlCom (Q setpoint), 1075 = PFCtlCom (PF setpoint), 303 = Off
     #SkidInverter."GriMng.VArMod" := #Inverter.VArMode;
-    // VArSpt: reactive power setpoint in kVAr (FIX0 — DInt, direct kVAr value)
-    #SkidInverter.VArSpt          := #Inverter.VArSpt;
-    // PFSpt: Inverter_controller = DInt FIX4 ×10000 (e.g. 9500 = PF 0.950)
-    //        Sunny_inverter       = Real cos(phi)    (e.g. 0.950)
-    #SkidInverter.PFSpt := DINT_TO_REAL(#Inverter.PFSpt) / 10000.0;
+    // VArSpt (v1.9 fallback): kVAr FIX0 to UID3 reg 112 — keep until v2.0 path validated on HW
+    #SkidInverter.VArSpt     := #Inverter.VArSpt;
+    // VArSpt_pct (v2.0): FIX2 % to UID2 addr 22 — SC 4600 UP reference = 2760 kVAr
+    #SkidInverter.VArSpt_pct := REAL_TO_INT(DINT_TO_REAL(#Inverter.VArSpt) / 2760.0 * 10000.0);
+    // PFSpt (v1.9 fallback): Real cos(phi) to UID3 reg 114
+    #SkidInverter.PFSpt      := DINT_TO_REAL(#Inverter.PFSpt) / 10000.0;
+    // PF_cos (v2.0): U16 FIX4 to UID2 addr 24 — same scaling as PFSpt (e.g. 9500 = PF 0.950)
+    #SkidInverter.PF_cos       := INT_TO_WORD(DINT_TO_INT(#Inverter.PFSpt));
+    // PF_excitation (v2.0): ENUM to UID2 addr 25 — 1041=over-excited, 1042=under-excited, set by SCADA/HMI
+    #SkidInverter.PF_excitation := DINT_TO_DWORD(#Inverter.PF_excitation);
 
     // ── Fault acknowledge — one-shot ──────────────────────────────────────────
     // FaultHandler FC sets ErrClr = 26 for exactly one OB30 scan, then 0.

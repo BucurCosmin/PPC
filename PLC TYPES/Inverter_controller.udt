@@ -21,6 +21,7 @@ VERSION : 0.1
       PwrOffReas : DInt;   // Detect why inverter disconnected.
       DrtStt : DInt;   // Derating state.
       ErrClr : DInt;
+      PF_excitation : DInt;   // PF direction ENUM: 1041=over-excited, 1042=under-excited - set by SCADA/HMI
       WSptMax : Real;   // Plant P ceiling from grid operator (kW) - maps to UID2 addr 4039
       WSptMin : Real;   // Plant P floor kW - negative valid for load/charge mode - maps to UID2 addr 4041
    END_STRUCT;
