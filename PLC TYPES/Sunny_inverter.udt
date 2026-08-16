@@ -22,6 +22,11 @@ VERSION : 0.1
       WAval : Real;   // Currently available active power
       VArAval : Real;   // Currently available reactive power
       PwrOffReas : DInt;   // Current cause of inverter disconnection
+      DrtStt : DInt;   // Derating status
+      WSpt_pct : Int;   // UID2 addr 23 - WSpt % FIX2 raw (100% = 10000)
+      VArSpt_pct : Int;   // UID2 addr 22 - VArSpt % FIX2 raw (100% = 10000)
+      PF_cos : Word;   // UID2 addr 24 - PF magnitude U16 FIX4 (cos_phi x 10000)
+      PF_excitation : DWord;   // UID2 addr 25 - PF direction ENUM (1041=OE, 1042=UE)
    END_STRUCT;
 
 END_TYPE
