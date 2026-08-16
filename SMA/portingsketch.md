@@ -13,9 +13,9 @@ Before any code changes, these must be confirmed against the actual v2.0 PDF:
 
 | # | Question | Why it matters |
 |---|---|---|
-| Q1 | Are the Unit ID 2 addresses (40022, 40023…) in **1-based** (40001 = first reg) or **0-based** PDU format? | Our MB_CLIENT uses 0-based; wrong address = wrong register |
+| Q1 | ~~Are the Unit ID 2 addresses (40022, 40023…) in 1-based or 0-based PDU format?~~ **CLOSED — v2.0 p.21 confirms 0-based: VArSpt = addr 22, WSpt = addr 23 (Unit ID 2)** | MB_DATA_ADDR: VArSpt=22, WSpt=23 ✓ |
 | Q2 | Does Unit ID 2 use the **same TCP connection** as Unit ID 3, or does it need a **separate socket**? | Determines if FB16 can reuse one connection or needs two |
-| Q3 | Are Unit ID 3 WSpt (reg 108) and VArSpt (reg 112) still valid write targets in v2.0, or deprecated? | If deprecated, old FSM states 5/6 must be changed entirely |
+| Q3 | ~~Are Unit ID 3 WSpt (reg 108) and VArSpt (reg 112) still valid write targets in v2.0?~~ **PARTIALLY CLOSED — v2.0 fast setpoint path is definitively Unit ID 2. Unit ID 3 reg 108/112 not the recommended path.** | Old FSM States 5/6 to be replaced by Unit ID 2 writes. Keep as fallback until validated on HW. |
 | Q4 | ~~What **firmware version** is installed on the SC 4600 UP units on site?~~ **CLOSED — firmware 10.03.14.R confirmed. v2.0 supported.** | v2.0 requires firmware ≥ 10.03.xx.R ✓ |
 | Q5 | WSpt/VArSpt at Unit ID 2 are S16 FIX2 (%). What is the **reference value** (`WExlSpt.RefVal` / `VArExlSpt.RefVal`) read from and at what register address? | Needed to convert kW → % for the write |
 | Q6 | For PF control: v2.0 uses reg 40024 + 40025 at Unit ID 2. Is the existing Unit ID 3 PFSpt (reg 114) still valid? | Affects PF write path |
