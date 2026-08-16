@@ -6,11 +6,15 @@ VERSION : 0.1
 // Call on the single scan when FSM_DB.Transition = TRUE for write states 4, 5, 6.
 // All three call sites are identical except WriteStep — pass the full Inv UDT every time.
 //
-// WriteStep 1 -> regs  0-9  : InvOpMod, RemRdy, VArMod, WMod, ErrClr  (FC16 addr 0,   len 10)
-// WriteStep 2 -> regs  0-1  : WSpt                                      (FC16 addr 108, len  2)
-// WriteStep 3 -> regs  0-3  : VArSpt, PFSpt                             (FC16 addr 112, len  4)
+// WriteStep 1 -> regs  0-9  : InvOpMod, RemRdy, VArMod, WMod, ErrClr  (FC16 UID3 addr 0,   len 10)
+// WriteStep 2 -> regs  0-1  : WSpt kW  (v1.9 deprecated)               (FC16 UID3 addr 108, len  2)
+// WriteStep 3 -> regs  0-3  : VArSpt, PFSpt (v1.9 deprecated)          (FC16 UID3 addr 112, len  4)
+// WriteStep 4 -> regs  0-1  : VArSpt_pct, WSpt_pct  FIX2 %             (FC16 UID2 addr 22,  len  2)
+// WriteStep 5 -> regs  0-2  : PF_cos, PF_excitation                    (FC16 UID2 addr 24,  len  3)
 //
-// All SMA registers are S32 big-endian (high word at lower address).
+// UID3 registers (steps 1-3) are S32 big-endian (high word at lower address).
+// UID2 registers (steps 4-5) are S16/U16 — one word per register, no splitting needed.
+// Scaling for steps 4-5 is done upstream in FC_PPC_SkidMapping before this FC is called.
 // PFSpt is Real in the UDT; SMA expects FIX4 (*10000) as S32.
 // ErrClr is one-shot: caller must zero Inverter.ErrClr after Write1_Done pulses.
 
@@ -74,6 +78,29 @@ BEGIN
          #PFSpt_DInt := REAL_TO_DINT(#Inv.PFSpt * 10000.0);
          #RegBuf[2] := DWORD_TO_WORD(SHR(IN := DINT_TO_DWORD(#PFSpt_DInt), N := 16));
          #RegBuf[3] := DWORD_TO_WORD(DINT_TO_DWORD(#PFSpt_DInt));
+
+      4:
+         // Write group 4 — FC16 UID2 addr 22, length 2 words
+         // S16 values — one word each, no S32 splitting. Scaling done in FC_PPC_SkidMapping.
+         // Buffer order: [0]=VArSpt_pct (addr 22), [1]=WSpt_pct (addr 23)
+
+         // reg 22 : VArSpt_pct S16 FIX2 %  (-10000 = -100%, 0 = 0%, 10000 = 100%)
+         #RegBuf[0] := INT_TO_WORD(#Inv.VArSpt_pct);
+
+         // reg 23 : WSpt_pct S16 FIX2 %
+         #RegBuf[1] := INT_TO_WORD(#Inv.WSpt_pct);
+
+      5:
+         // Write group 5 — FC16 UID2 addr 24, length 3 words
+         // reg 24 : PF_cos U16 FIX4 (cos_phi * 10000, e.g. 0.95 -> 9500)
+         // reg 25-26 : PF_excitation U32 ENUM (1041=over-excited, 1042=under-excited)
+
+         // reg 24 : PF_cos (Word, pass through directly)
+         #RegBuf[0] := #Inv.PF_cos;
+
+         // reg 25-26 : PF_excitation DWord big-endian
+         #RegBuf[1] := DWORD_TO_WORD(SHR(IN := #Inv.PF_excitation, N := 16));
+         #RegBuf[2] := DWORD_TO_WORD(#Inv.PF_excitation);
 
    END_CASE;
 
