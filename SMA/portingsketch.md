@@ -27,16 +27,20 @@ Before any code changes, these must be confirmed against the actual v2.0 PDF:
 
 ### 1.1 Write target split (BIGGEST change)
 
-| Signal | v1.9 | v2.0 |
-|---|---|---|
-| WSpt | Unit ID 3, reg 108, S32 FIX0 kW | Unit ID 2, reg 40023, **S16 FIX2 %** |
-| VArSpt | Unit ID 3, reg 112, S32 FIX0 kVAr | Unit ID 2, reg 40022, **S16 FIX2 %** |
-| PF magnitude | Unit ID 3, reg 114, S32 FIX4 | Unit ID 2, reg 40024, **U16 FIX4** |
-| PF excitation | (not separate) | Unit ID 2, reg 40025, U32 ENUM |
-| VolNomSpt | (not available) | Unit ID 2, reg 41263, U16 FIX4 p.u. |
-| HzNomSpt | (not available) | Unit ID 2, reg 41261, U32 FIX3 Hz |
-| WSptMax | (not available) | Unit ID 2, reg 44039, S32 FIX2 % |
-| WSptMin | (not available) | Unit ID 2, reg 44041, S32 FIX2 % |
+Addresses below are **0-based PDU** (SMA convention: "4xxxx" = 40000 + PDU addr, confirmed from v2.0 p.21).
+
+| Signal | v1.9 | v2.0 | PDU addr | Type | Scaling | Raw formula |
+|---|---|---|---|---|---|---|
+| WSpt | UID3 reg 108, S32 FIX0 kW | UID2 | **23** | S16 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` |
+| VArSpt | UID3 reg 112, S32 FIX0 kVAr | UID2 | **22** | S16 | 100 | `(kVAr / VArExlSpt_RefVal_kVAr) × 10000` |
+| PF magnitude | UID3 reg 114, S32 FIX4 | UID2 | **24** | U16 | 10000 | `cos_phi × 10000` |
+| PF excitation | (not separate) | UID2 | **25** | U32 | 1 | ENUM |
+| VolNomSpt | (not available) | UID2 | **1263** | U16 | 10000 | `p.u. × 10000` |
+| HzNomSpt | (not available) | UID2 | **1261** | U32 | 1000 | `Hz × 1000` |
+| WSptMax | (not available) | UID2 | **4039** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` |
+| WSptMin | (not available) | UID2 | **4041** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` |
+
+> **FIX2 scaling confirmed from v2.0 p.21:** scaling = 100 → 100.00% = raw 10000, -50.00% = raw -5000. Both WSpt and VArSpt are S16, adjacent registers → **write both in ONE FC16 frame** (addr=22, len=2).
 
 Mode/config registers (Unit ID 3: InvOpMod, RemRdy, GriMng.VArMod, GriMng.WMod) remain at Unit ID 3 but must become **event-driven** (write only on change), not cyclic.
 
@@ -108,13 +112,17 @@ State 7: FC16 write,UID3, addr=0,   len=10   (InvOpMod, RemRdy — EVENT DRIVEN,
 - `WriteStep_UID2_PF`: pack U16 PF + U32 excitation type into 3 words
 - `WriteStep_UID2_VolSpt` (optional, only if U-control uses VolNomSpt)
 
-**Scaling logic to add:**
+**Scaling logic confirmed (v2.0 p.21, scaling=100, FIX2):**
+```scl
+// raw = percent × 100, and percent = (kW / RefVal_kW) × 100
+// → raw = kW / RefVal_kW × 10000
+WSpt_raw  := REAL_TO_INT(DINT_TO_REAL(Inverter.WSpt)  / DINT_TO_REAL(WExlSpt_RefVal)  * 10000.0);
+VArSpt_raw := REAL_TO_INT(DINT_TO_REAL(Inverter.VArSpt) / DINT_TO_REAL(VArExlSpt_RefVal) * 10000.0);
+// Both fit in S16: ±100% = ±10000, well within ±32767
+// Pack as: holdingRegisterMod[0] = VArSpt_raw (WORD), [1] = WSpt_raw (WORD)
+// → single FC16, UID2, addr=22, len=2
 ```
-WSpt_pct_raw := REAL_TO_INT(Inverter.WSpt_kW / WExlSpt_RefVal_kW * 10000.0)
-    // S16 FIX2 → value 10000 = 100.00%
-VArSpt_pct_raw := REAL_TO_INT(Inverter.VArSpt_kVar / VArExlSpt_RefVal_kVar * 10000.0)
-```
-> ⚠️ Exact FIX2 scaling factor to verify against v2.0 PDF (FIX2 means ×100 or ×10000?)
+> If WExlSpt_RefVal / VArExlSpt_RefVal not yet read from inverter: use static WRtg (input reg 184) as fallback denominator until new read state is added.
 
 ### 2.3 FC_PPC_SkidMapping.scl
 
