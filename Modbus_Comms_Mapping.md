@@ -1,10 +1,11 @@
-# SMA Sunny Central — Modbus Comms Block Mapping (Corrected)
+# SMA Sunny Central — Modbus Comms Block Mapping
 
 **Target:** PPC_Controller [DB39], UDT `Inverter_controller`  
-**Connection:** Modbus TCP, Unit ID = 3  
-**Source:** `SMA\MODBUS-SCxxxx-TI-en-19.pdf` + `SMA\SCADA_Modbus_Register_Map_SMA_SunnyCentral_ENUMS_Ramps_RideThrough_PPC_RO.xlsx`  
+**Connection:** Modbus TCP — **Unit ID 2** (fast setpoints, cyclic 100 ms) + **Unit ID 3** (measurements, parameters, event-driven writes)  
+**Source (current):** `SMA\MODBUS-SC-TI-en-20.pdf` (v2.0, firmware ≥ 10.03.xx.R — installed: 10.03.14.R)  
+**Source (previous):** `SMA\MODBUS-SCxxxx-TI-en-19.pdf` (v1.9 — deprecated registers kept in §2.4 and §4.2 for transition reference)
 
-> **Correction note:** Previous version incorrectly referenced `GriMng.WNom`, `GriMng.VArNom`, and `GriMng.PFNom` for active power, reactive power, and power factor setpoints. These names **do not exist** in the SMA Modbus profile. The correct register names are `WSpt` (address 108), `VArSpt` (address 112), and `PFSpt` (address 114). Previous version also used wrong OpStt ENUM codes (308/309) — corrected to the actual SMA values (3526/3527).
+> **v2.0 key change:** Fast setpoints (WSpt, VArSpt, PF) moved from Unit ID 3 kW/kVAr registers to Unit ID 2 % FIX2 registers. Mode/config parameters (InvOpMod, RemRdy, VArMod, WMod) remain on Unit ID 3 but must be **event-driven** — not cyclic. Same TCP socket handles both Unit IDs.
 
 ---
 
@@ -13,8 +14,11 @@
 | Item | Value |
 |---|---|
 | Modbus protocol | TCP/IP |
-| Unit (Slave) ID | 3 |
-| Register bit-width | 32-bit values — each occupies **2 consecutive 16-bit registers** |
+| Unit ID 2 | Fast setpoints — WSpt %, VArSpt %, PF (cyclic 100 ms) |
+| Unit ID 3 | Measurements, status, parameters (reads cyclic; mode writes event-driven) |
+| TCP socket | **Single connection** — Unit ID switched per FSM state |
+| Register bit-width (UID3) | 32-bit values — each occupies **2 consecutive 16-bit registers** |
+| Register bit-width (UID2) | 16-bit values (S16/U16) — each occupies **1 register** |
 | Addressing | 0-based (register 0 = first holding or first input register) |
 | Write function code | **FC16** (0x10) Write Multiple Holding Registers |
 | Read holding registers | **FC03** (0x03) Read Holding Registers |
@@ -27,9 +31,9 @@
 | Format | Scaling | Example |
 |---|---|---|
 | ENUM | 1 (integer code) | InvOpMod: 308 = Operation |
-| FIX0 | ×1 — value in physical units | WSpt: 500 → 500 kW |
+| FIX0 | ×1 — value in physical units | WSpt (v1.9): 500 → 500 kW |
 | FIX1 | ×10 | GriMs.Hz: 5000 → 50.00 Hz |
-| FIX2 | ×100 | — |
+| FIX2 | ×100 | WSpt (v2.0): 10000 → 100.00%, −5000 → −50.00% |
 | FIX4 | ×10000 | PFSpt: 9500 → PF 0.9500 |
 
 **Register address note:** WSpt, VArSpt, and PFSpt appear in the SMA register map as *Input Register* readbacks (FC04, read-only). SMA Sunny Central also accepts FC16 writes to these same addresses when the corresponding control mode (WCtlCom / VArCtlCom / PFCtlCom) is active. The FC04 readback confirms what setpoint the inverter is currently tracking.
@@ -38,22 +42,59 @@
 
 ## 2. WRITE to SMA Inverter — FC16 (PLC → Inverter)
 
-Written every OB30 cycle (except ErrClr which is one-shot only).
+### 2.1 v2.0 Cyclic Writes — Unit ID 2, FC16 (fast setpoints, every 100 ms)
 
-| # | UDT Field | SMA Channel | Reg Addr (DEC) | Words | Data Type | Format | Unit | Written by |
+| # | Skid UDT Field | SMA Channel | PDU Addr | Words | Data Type | Format | Unit | Notes |
 |---|---|---|---|---|---|---|---|---|
-| 1 | *(derived)* | `RemRdy` | **2** | 2 | S32 | ENUM | — | Comms block (derived from OperMode) |
-| 2 | `OperMode` | `InvOpMod` | **0** | 2 | S32 | ENUM | — | FaultHandler |
-| 3 | `WMode` | `GriMng.WMod` | **6** | 2 | S32 | ENUM | — | PowerDistribution |
-| 4 | `VArMode` | `GriMng.VArMod` | **4** | 2 | S32 | ENUM | — | ReactiveControl |
-| 5 | `WSpt` | `WSpt` | **108** | 2 | S32 | FIX0 | kW | PowerDistribution |
-| 6 | `VArSpt` | `VArSpt` | **112** | 2 | S32 | FIX0 | kVAr | ReactiveControl |
-| 7 | `PFSpt` | `PFSpt` | **114** | 2 | S32 | FIX4 | — | ReactiveControl |
-| 8 | `ErrClr` | `ErrClr` | **8** | 2 | S32 | ENUM | — | FaultHandler (one-shot) |
+| 1 | `VArSpt_pct` | `VArSpt` | **22** | 1 | S16 | FIX2 % | % of VArRtg | −100% to +100% |
+| 2 | `WSpt_pct` | `WSpt` | **23** | 1 | S16 | FIX2 % | % of WRtg | −100% to +100% |
+| 3 | `PF_cos` | *(PF magnitude)* | **24** | 1 | U16 | FIX4 | — | cos_phi × 10000 |
+| 4 | `PF_excitation` | *(PF direction)* | **25** | 2 | U32 | ENUM | — | Over/underexcited |
 
-> Note: RemRdy (reg 2) must always be written **before** InvOpMod (reg 0). Write in order: RemRdy → InvOpMod.
+VArSpt_pct and WSpt_pct are adjacent → written in **one FC16 frame** (addr=22, len=2, FSM State 4).  
+PF registers (addr=24, len=3) are a separate FC16 frame (FSM State 5), written **only when PF mode is active**.
 
-### 2.1 ENUM Values for Write Registers
+**Scaling formula — SC 4600 UP (hardcoded reference values):**
+
+```scl
+// WExlSpt.RefVal = 4600 kW (UID3 addr 269), VArExlSpt.RefVal = 2760 kVAr (UID3 addr 268)
+// Hardcoded — read from inverter only if dynamic derating is later required
+WSpt_raw   := REAL_TO_INT(DINT_TO_REAL(Inverter.WSpt)   / 4600.0 * 10000.0);
+VArSpt_raw := REAL_TO_INT(DINT_TO_REAL(Inverter.VArSpt) / 2760.0 * 10000.0);
+// 100% = raw 10000 | −50% = raw −5000 | S16 range ±32767 covers ±327.67% safely
+```
+
+**Scaling examples:**
+
+| PPC setpoint | Raw value | Physical meaning |
+|---|---|---|
+| WSpt = 4600 kW | 10000 | 100% rated power |
+| WSpt = 2300 kW | 5000 | 50% rated power |
+| VArSpt = −1380 kVAr | −5000 | −50% (capacitive) |
+| VArSpt = 0 kVAr | 0 | No reactive power |
+
+**PF excitation ENUM values (UID2 addr 25):**
+
+| Code | Meaning |
+|---|---|
+| 1041 | Over-excited (inductive, lagging) |
+| 1042 | Under-excited (capacitive, leading) |
+
+### 2.2 v2.0 Event-Driven Writes — Unit ID 3, FC16 (parameters, on change only)
+
+> ⚠️ **v2.0 rule:** Writing these registers every 100 ms cycle updates SMA non-volatile storage and is explicitly prohibited. Write **only when the value changes** using a change-detect latch in the FSM (State 6).
+
+| # | UDT Field | SMA Channel | Reg Addr (DEC) | Words | Data Type | Format | Unit |
+|---|---|---|---|---|---|---|---|
+| 1 | `OperMode` | `InvOpMod` | **0** | 2 | S32 | ENUM | — |
+| 2 | *(derived)* | `RemRdy` | **2** | 2 | S32 | ENUM | — |
+| 3 | `VArMode` | `GriMng.VArMod` | **4** | 2 | S32 | ENUM | — |
+| 4 | `WMode` | `GriMng.WMod` | **6** | 2 | S32 | ENUM | — |
+| 5 | `ErrClr` | `ErrClr` | **8** | 2 | S32 | ENUM | — |
+
+> RemRdy (reg 2) must be written **before** InvOpMod (reg 0). Both are packed into the same FC16 frame (addr=0, len=10) so sequencing is preserved.
+
+### 2.3 ENUM Values for Write Registers
 
 #### InvOpMod (Holding Reg 0) — Unique ID 329
 
@@ -98,7 +139,17 @@ Written every OB30 cycle (except ErrClr which is one-shot only).
 | **26** | Ackn | Acknowledge present fault — **one-shot rising edge only** |
 | 973 | — | No action (idle) |
 
-### 2.2 Setpoint Scaling Examples
+### 2.4 v1.9 Write Registers — Unit ID 3 (DEPRECATED)
+
+> ⚠️ **These are the v1.9 setpoint write registers.** Kept here for transition reference while both FSM paths coexist. Remove once UID2 v2.0 path is validated on hardware.
+
+| # | UDT Field | SMA Channel | Reg Addr (DEC) | Words | Data Type | Format | Unit |
+|---|---|---|---|---|---|---|---|
+| 1 | `WSpt` | `WSpt` | **108** | 2 | S32 | FIX0 | kW |
+| 2 | `VArSpt` | `VArSpt` | **112** | 2 | S32 | FIX0 | kVAr |
+| 3 | `PFSpt` | `PFSpt` | **114** | 2 | S32 | FIX4 | — |
+
+Scaling examples (v1.9):
 
 | UDT Value | Register Value | Physical Value |
 |---|---|---|
@@ -107,7 +158,7 @@ Written every OB30 cycle (except ErrClr which is one-shot only).
 | PFSpt = 0.95 | 9500 | cos φ = 0.950 (lagging) |
 | PFSpt = 1.00 | 10000 | cos φ = 1.000 (unity) |
 
-### 2.3 Critical Write Sequencing — SMA Interlock Rules
+### 2.5 Critical Write Sequencing — SMA Interlock Rules
 
 **START sequence (OperMode → 308):**
 1. Write `RemRdy = 308` (Holding reg 2) — grant remote permission
@@ -217,31 +268,62 @@ Error := (ErrStt <> 307)
 
 ---
 
-## 4. FB15 FSM — Read and Write State Machine (TIA Portal Implementation)
+## 4. FB16 FSM — Read and Write State Machine (TIA Portal Implementation)
 
-FB15 `ReadInverterData` uses a `FunctionalStateMachine` with **6 states** per inverter cycle. States 1–3 read, states 4–6 write. The FSM advances on each `MB_CLIENT` `done` rising edge. All 10 inverter instances run in parallel (each has its own IDB and TCP connection).
+FB16 `InverterControl` uses a `FunctionalStateMachine` with **6 states** per inverter cycle. States 1–3 read (Unit ID 3), states 4–6 write (UID2 setpoints + UID3 event-driven mode). The FSM advances on each `MB_CLIENT` `done` rising edge. All inverter instances run in parallel (each has its own IDB and TCP connection). `MB_Unit_ID` is set per state.
 
-| State | Direction | FC | Modbus Addr | Words | Data mapped |
-|---|---|---|---|---|---|
-| 1 | READ  | FC03 (mode 103) | 0   | 104 | Holding regs → Inverter UDT + ParamHold |
-| 2 | READ  | FC04 (mode 104) | 10  | 106 | Input regs → ParamInputs + Inverter measurements |
-| 3 | READ  | FC04 (mode 104) | 116 | 112 | Input regs continued → ParamInputs |
-| 4 | WRITE | FC16 (mode 116) | 0   | 10  | InvOpMod, RemRdy, VArMod, WMod, ErrClr |
-| 5 | WRITE | FC16 (mode 116) | 108 | 2   | WSpt |
-| 6 | WRITE | FC16 (mode 116) | 112 | 4   | VArSpt + PFSpt |
+> **MB_CLIENT modbusMode encoding:** `100 + Modbus FC#` — mode 103 = FC03, mode 104 = FC04, mode 116 = FC16. Using mode 1 instead of 116 caused all FC16 writes to fail silently. Fixed 2026-08-15.
 
-> **MB_CLIENT modbusMode encoding:** This MB_CLIENT uses `100 + Modbus FC#` — mode 103 = FC03, mode 104 = FC04, mode 116 = FC16. Using mode 1 instead of 116 caused all FC16 writes to fail silently (wrong function code sent to SMA). Fixed 2026-08-15.
+### 4.1 v2.0 FSM (current)
 
-> Regs 110–111 (gap between WSpt and VArSpt) are **not written** — states 5 and 6 are intentionally separate transactions to avoid writing unknown registers.
+| State | Direction | FC | Unit ID | Modbus Addr | Words | Data mapped |
+|---|---|---|---|---|---|---|
+| 1 | READ  | FC03 (mode 103) | 3 | 0   | 104 | Holding regs → Inverter UDT + ParamHold |
+| 2 | READ  | FC04 (mode 104) | 3 | 10  | 106 | Input regs → ParamInputs + Inverter measurements |
+| 3 | READ  | FC04 (mode 104) | 3 | 116 | 112 | Input regs continued → ParamInputs |
+| 4 | WRITE | FC16 (mode 116) | **2** | **22** | **2** | VArSpt_pct (S16) + WSpt_pct (S16) — cyclic fast setpoints |
+| 5 | WRITE | FC16 (mode 116) | **2** | **24** | **3** | PF_cos (U16) + PF_excitation (U32) — PF mode only |
+| 6 | WRITE | FC16 (mode 116) | **3** | 0   | 10  | InvOpMod, RemRdy, VArMod, WMod, ErrClr — **event-driven** |
 
-### 4.1 Write Buffer Packing — FC_Pack_Write_Regs
+> State 6 is gated by a change-detect latch: only executes when any mode/command field has changed since last write. Prevents non-volatile storage wear.
 
-Before each write state the helper FC `FC_Pack_Write_Regs` is called (on the one-scan `FSM_DB.Transition` pulse) to pack the SKID_DB setpoint values into `holdingRegisterMod[]` for `MB_CLIENT`. Every DInt is split into two big-endian Words (high word at lower buffer index). PFSpt Real is scaled ×10000 before packing.
+### 4.2 v1.9 FSM (DEPRECATED — transition reference only)
+
+| State | Direction | FC | Unit ID | Modbus Addr | Words | Data mapped |
+|---|---|---|---|---|---|---|
+| 1 | READ  | FC03 (mode 103) | 3 | 0   | 104 | Holding regs |
+| 2 | READ  | FC04 (mode 104) | 3 | 10  | 106 | Input regs |
+| 3 | READ  | FC04 (mode 104) | 3 | 116 | 112 | Input regs continued |
+| 4 | WRITE | FC16 (mode 116) | 3 | 0   | 10  | InvOpMod, RemRdy, VArMod, WMod, ErrClr |
+| 5 | WRITE | FC16 (mode 116) | 3 | 108 | 2   | WSpt (kW, FIX0) |
+| 6 | WRITE | FC16 (mode 116) | 3 | 112 | 4   | VArSpt (kVAr, FIX0) + PFSpt (FIX4) |
+
+### 4.3 Write Buffer Packing — FC_Pack_Write_Regs
+
+Before each write state the helper FC `FC_Pack_Write_Regs` is called (on the one-scan `FSM_DB.Transition` pulse) to pack the SKID_DB setpoint values into `holdingRegisterMod[]` for `MB_CLIENT`.
+
+**v2.0 WriteSteps:**
 
 ```
-WriteStep 1 → holdingRegisterMod[0..9]  (states 4 write: regs 0-9)
-WriteStep 2 → holdingRegisterMod[0..1]  (state 5 write: reg 108-109)
-WriteStep 3 → holdingRegisterMod[0..3]  (state 6 write: regs 112-115)
+WriteStep_UID2_SetPt → holdingRegisterMod[0..1]  (State 4: UID2 addr 22-23)
+  [0] = VArSpt_pct (S16 raw, INT_TO_WORD)
+  [1] = WSpt_pct   (S16 raw, INT_TO_WORD)
+
+WriteStep_UID2_PF    → holdingRegisterMod[0..2]  (State 5: UID2 addr 24-26)
+  [0] = PF_cos      (U16 FIX4, WORD)
+  [1] = PF_excit HW (high word of U32 ENUM)
+  [2] = PF_excit LW (low word of U32 ENUM)
+
+WriteStep_UID3_Mode  → holdingRegisterMod[0..9]  (State 6: UID3 addr 0-9)
+  — same as v1.9 WriteStep 1 (InvOpMod, RemRdy, VArMod, WMod, ErrClr as S32 word pairs)
+```
+
+**v1.9 WriteSteps (deprecated — keep until v2.0 validated):**
+
+```
+WriteStep 1 → holdingRegisterMod[0..9]  (v1.9 State 4: UID3 regs 0-9)
+WriteStep 2 → holdingRegisterMod[0..1]  (v1.9 State 5: UID3 regs 108-109)
+WriteStep 3 → holdingRegisterMod[0..3]  (v1.9 State 6: UID3 regs 112-115)
 ```
 
 ### 4.2 FC17 Race Condition Fix — WSpt/VArSpt/PFSpt Readback
@@ -421,4 +503,4 @@ The SMA Sunny Central monitors a **lifesign counter** written by the Modbus mast
 
 ---
 
-*Document version: updated 2026-06-04 | Additions: FB15 6-state FSM, FC17 race condition fix, FC_Pack_Write_Regs, IEC_Watchdog, AuxCtl.LifeSign watchdog | Source: MODBUS-SCxxxx-TI-en-19 §5.3 + SCADA Register Map XLSX*
+*Document version: updated 2026-08-16 | v2.0 porting: dual Unit ID architecture, UID2 % setpoints (FIX2), event-driven UID3 mode writes, v1.9 deprecated sections retained for transition | Source: MODBUS-SC-TI-en-20 (v2.0, firmware 10.03.14.R) + MODBUS-SCxxxx-TI-en-19 (v1.9)*

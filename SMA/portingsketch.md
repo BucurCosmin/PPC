@@ -14,12 +14,12 @@ Before any code changes, these must be confirmed against the actual v2.0 PDF:
 | # | Question | Why it matters |
 |---|---|---|
 | Q1 | ~~Are the Unit ID 2 addresses (40022, 40023…) in 1-based or 0-based PDU format?~~ **CLOSED — v2.0 p.21 confirms 0-based: VArSpt = addr 22, WSpt = addr 23 (Unit ID 2)** | MB_DATA_ADDR: VArSpt=22, WSpt=23 ✓ |
-| Q2 | Does Unit ID 2 use the **same TCP connection** as Unit ID 3, or does it need a **separate socket**? | Determines if FB16 can reuse one connection or needs two |
+| Q2 | ~~Does Unit ID 2 use the **same TCP connection** as Unit ID 3, or does it need a **separate socket**?~~ **CLOSED — same TCP connection confirmed. FB16 can reuse the existing MB_CLIENT instance, just change MB_Unit_ID per state.** | No extra socket needed ✓ |
 | Q3 | ~~Are Unit ID 3 WSpt (reg 108) and VArSpt (reg 112) still valid write targets in v2.0?~~ **PARTIALLY CLOSED — v2.0 fast setpoint path is definitively Unit ID 2. Unit ID 3 reg 108/112 not the recommended path.** | Old FSM States 5/6 to be replaced by Unit ID 2 writes. Keep as fallback until validated on HW. |
 | Q4 | ~~What **firmware version** is installed on the SC 4600 UP units on site?~~ **CLOSED — firmware 10.03.14.R confirmed. v2.0 supported.** | v2.0 requires firmware ≥ 10.03.xx.R ✓ |
-| Q5 | WSpt/VArSpt at Unit ID 2 are S16 FIX2 (%). What is the **reference value** (`WExlSpt.RefVal` / `VArExlSpt.RefVal`) read from and at what register address? | Needed to convert kW → % for the write |
-| Q6 | For PF control: v2.0 uses reg 40024 + 40025 at Unit ID 2. Is the existing Unit ID 3 PFSpt (reg 114) still valid? | Affects PF write path |
-| Q7 | Is `VolNomSpt` (Unit ID 2, reg 41263) **needed for U control** (mode 3), or does our existing Q-based PID via VArSpt remain better? | Architecture decision — not just porting |
+| Q5 | ~~WSpt/VArSpt at Unit ID 2 are S16 FIX2 (%). What is the **reference value** (`WExlSpt.RefVal` / `VArExlSpt.RefVal`) read from and at what register address?~~ **CLOSED — UID3 addr 269 (WExlSpt.RefVal, S16 FIX0 kW) and addr 268 (VArExlSpt.RefVal, S16 FIX0 kVAr). For SC 4600 UP: WExlSpt.RefVal = 4600 kW, VArExlSpt.RefVal = 2760 kVAr — hardcoded constants, no extra read state needed.** | RefVal hardcoded: W=4600, VAr=2760 ✓ |
+| Q6 | ~~For PF control: v2.0 uses reg 40024 + 40025 at Unit ID 2. Is the existing Unit ID 3 PFSpt (reg 114) still valid?~~ **CLOSED — use v2.0 UID2 addr 24 (U16 cos_phi FIX4) + addr 25 (U32 excitation ENUM). UID3 reg 114 deprecated.** | PF write moves to UID2 ✓ |
+| Q7 | ~~Is `VolNomSpt` (Unit ID 2, reg 41263) **needed for U control** (mode 3), or does our existing Q-based PID via VArSpt remain better?~~ **CLOSED — keep existing Q-based PID. VArSpt % path (UID2 addr 22) drives U control via PID output. VolNomSpt not used.** | No change to control architecture ✓ |
 
 ---
 
@@ -83,16 +83,17 @@ State 5: FC16 write,UID3, addr=108, len=2    (WSpt kW)
 State 6: FC16 write,UID3, addr=112, len=4    (VArSpt + PFSpt)
 ```
 
-**Required new FSM (TBD states):**
+**Required new FSM (confirmed states):**
 ```
 State 1: FC03 read, UID3, addr=0,   len=104  (holdings — same)
 State 2: FC04 read, UID3, addr=10,  len=106  (inputs — same)
 State 3: FC04 read, UID3, addr=116, len=112  (inputs cont. — same)
-State 4: FC03 read, UID2, addr=?,   len=?    (NEW: read RefVal + Unit ID 2 feedback)
-State 5: FC16 write,UID2, addr=?,   len=?    (NEW: WSpt % + VArSpt % fast setpoints)
-State 6: FC16 write,UID2, addr=?,   len=?    (NEW: PF cmd and/or VolNomSpt if needed)
-State 7: FC16 write,UID3, addr=0,   len=10   (InvOpMod, RemRdy — EVENT DRIVEN, not every cycle)
+State 4: FC16 write,UID2, addr=22,  len=2    (NEW: VArSpt % + WSpt % fast setpoints)
+State 5: FC16 write,UID2, addr=24,  len=3    (NEW: PF_cos U16 + PF_excitation U32 — only when PF mode active)
+State 6: FC16 write,UID3, addr=0,   len=10   (InvOpMod, RemRdy — EVENT DRIVEN, not every cycle)
 ```
+> Read UID2 state removed — RefVal hardcoded (4600/2760), no runtime read needed.
+> Old States 5/6 (UID3 WSpt/VArSpt kW) to be removed once UID2 path validated on HW.
 
 > ⚠️ State 7 (old mode write) must be gated: only write when mode has changed, not every 100 ms.  
 > ⚠️ Old States 5+6 (Unit ID 3 WSpt/VArSpt kW writes) — keep or remove pending Q3 answer.
@@ -114,15 +115,15 @@ State 7: FC16 write,UID3, addr=0,   len=10   (InvOpMod, RemRdy — EVENT DRIVEN,
 
 **Scaling logic confirmed (v2.0 p.21, scaling=100, FIX2):**
 ```scl
-// raw = percent × 100, and percent = (kW / RefVal_kW) × 100
-// → raw = kW / RefVal_kW × 10000
-WSpt_raw  := REAL_TO_INT(DINT_TO_REAL(Inverter.WSpt)  / DINT_TO_REAL(WExlSpt_RefVal)  * 10000.0);
-VArSpt_raw := REAL_TO_INT(DINT_TO_REAL(Inverter.VArSpt) / DINT_TO_REAL(VArExlSpt_RefVal) * 10000.0);
+// RefVal hardcoded: SC 4600 UP — W_REF = 4600 kW, VAr_REF = 2760 kVAr
+// raw = (kW / RefVal) × 10000  (FIX2 scaling=100, so 100% = raw 10000)
+WSpt_raw   := REAL_TO_INT(DINT_TO_REAL(Inverter.WSpt)   / 4600.0  * 10000.0);
+VArSpt_raw := REAL_TO_INT(DINT_TO_REAL(Inverter.VArSpt) / 2760.0  * 10000.0);
 // Both fit in S16: ±100% = ±10000, well within ±32767
 // Pack as: holdingRegisterMod[0] = VArSpt_raw (WORD), [1] = WSpt_raw (WORD)
 // → single FC16, UID2, addr=22, len=2
 ```
-> If WExlSpt_RefVal / VArExlSpt_RefVal not yet read from inverter: use static WRtg (input reg 184) as fallback denominator until new read state is added.
+> RefVal registers exist at UID3 addr 268/269 if dynamic reading is needed later (e.g., if grid operator reconfigures internal derating). For fixed SC 4600 UP installation, constants are sufficient.
 
 ### 2.3 FC_PPC_SkidMapping.scl
 
@@ -193,7 +194,7 @@ Key additions:
 - MB_CLIENT instance, TCP connection setup, FSM engine — same structure
 - FC_PPC_SkidMapping read direction — same field mapping
 - FB_PPC_Controller control modes (0–3) — same logic, only scaling/write path changes
-- U control mode 3 PID — still Q-based via VArSpt (just % now instead of kVAr)
+- U control mode 3 PID — still Q-based via VArSpt % (UID2 addr 22). VolNomSpt (UID2 addr 1263) not used.
 - ANRE droop / FRT logic — unchanged
 
 ---
@@ -203,7 +204,7 @@ Key additions:
 | Risk | Severity | Mitigation |
 |---|---|---|
 | ~~Firmware < 10.03.xx.R on site inverters~~ | ~~CRITICAL~~ | **CLOSED — 10.03.14.R confirmed** |
-| Unit ID 2 requires separate TCP socket | High | Test with external Modbus tool on UID2 before FB16 changes |
+| ~~Unit ID 2 requires separate TCP socket~~ | ~~High~~ | **CLOSED — same TCP connection confirmed** |
 | FIX2 scaling wrong (100 vs 10000) | High | Verify against PDF + test with small setpoint |
 | Unit ID 3 WSpt/VArSpt deprecated in v2.0 — old states left in FSM | Medium | Test both paths, remove old if confirmed deprecated |
 | Mode write becoming non-volatile damage | Medium | Gate State 7 write on change-detect latch from day 1 |
