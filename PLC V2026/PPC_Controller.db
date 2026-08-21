@@ -1,0 +1,115 @@
+﻿DATA_BLOCK "PPC_Controller"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR 
+      Inverters { S7_SetPoint := 'False'} : "PPC_inverters";
+      Inverter1 { S7_SetPoint := 'False'} : "Inverter_controller";
+      Inverter2 : "Inverter_controller";
+      Inverter3 : "Inverter_controller";
+      Inverter4 : "Inverter_controller";
+      Inverter5 : "Inverter_controller";
+      Inverter6 : "Inverter_controller";
+      Inverter7 : "Inverter_controller";
+      Inverter8 : "Inverter_controller";
+      Inverter9 : "Inverter_controller";
+      Inverter10 : "Inverter_controller";
+      START_CONTROLLER { S7_SetPoint := 'True'} : Bool;
+      P_RampUp : Real;   // kW/s — ramp-up rate (1 MW/s default)
+      P_RampDown : Real;   // kW/s — ramp-down rate (1 MW/s default)
+      Q_RampUp : Real;   // kVArps — legacy; superseded by Q_Ramp_Rate_fast/slow
+      Q_RampDown : Real;   // legacy; superseded by Q_Ramp_Rate_fast/slow
+      PF_Ramp : Real;   // ps
+      Plant_P_meas : Real;   // kW
+      Plant_Q_meas : Real;   // kVAr
+      Plant_N_Online : Int;
+      Plant_Mode : Int;   // 0=LOCAL / 1=REMOTE_IEC / 2=FALLBACK
+      Targets_P : Real;   // kW
+      Targets_Q : Real;   // kVAr
+      Targets_PF : Real;
+      Limits_PmaxPlant : Real;
+      Limits_QmaxPlant : Real;
+      Ramps_Pcmd : Real;
+      Ramps_Qcmd : Real;
+      WRtg_kW : Real;   // kW per inverter (SMA SC 4600 UP, 10 × 4600 = 46 MW plant)
+      AnyFault : Bool;
+      AnyDerating : Bool;
+      FaultMask : Word;   // ── Frequency response parameters (ANRE Ord 51/2019 Art. 114-120) ───────── All SCADA-writable; change without code reload.
+      f_nom : Real;   // Hz, nominal grid frequency
+      Pn_MW : Real;   // MW, plant nominal rated power (CEF Tandarei 10 × SMA SC 4600 UP)
+      Droop_OF_pct : Real;   // %, over-frequency droop (Art. 114-115, ANRE Ord.51/2019)
+      Droop_UF_pct : Real;   // %, under-frequency droop (Art. 118-120, ANRE Ord.51/2019)
+      DeadBand_mHz : Real;   // mHz, dead band (set 0 for Art.117 fine-response sub-test)
+      Pmin_stab : Real;   // kW, minimum stable power
+      OFRT_Trip_Hz : Real;   // Hz, over-frequency trip threshold (Art. 118-120)
+      UFRT_Trip_Hz : Real;   // Hz, under-frequency trip threshold (Art. 118-120)
+      Reconnect_Enable : Bool;   // Rising edge clears freq trip latch (operator/SCADA button) ── Frequency response diagnostics (written by FB, SCADA-readable) ────────
+      P_setpoint_final : Real;   // kW, total P sent to inverters = Ramps_Pcmd + dP_droop, clamped
+      dP_droop : Real;   // kW, droop correction applied this cycle (ISCE acquisition)
+      FreqResp_Pmin : Real;   // kW, dynamic Pmin_active = Pmin_stab + dP_at_200mHz
+      FreqResp_Pmax : Real;   // kW, dynamic Pmax_active = PmaxPlant - dP_at_200mHz
+      Trip_FreqFault : Bool;   // TRUE: freq outside UFRT/OFRT, inverter setpoints zeroed
+      Reconnecting : Bool;   // TRUE: recovering from trip, ramp-up in progress
+      Reconnect_Timer_s : Real;   // s, elapsed reconnect time from trip-clear (ISCE Test 7) ── Q capability / voltage control parameters (ANRE Art. 147, 160, 163) ─── All SCADA-writable.
+      VArControl_Mode : Int;   // 0=fixed Q, 1=U droop, 2=off, 3=U Control PID  (Q source inside QCapability)
+      U_setpoint_ext : Real;   // kV, MV busbar voltage setpoint for U-droop mode
+      U_Droop_pct : Real;   // %, voltage droop (default 5%)
+      Q_Ramp_Rate_fast : Real;   // kVAr/s, fast Q ramp rate (ISCE Test 6)
+      Q_Ramp_Rate_slow : Real;   // kVAr/s, slow Q ramp rate (ISCE Test 6)
+      Q_Ramp_Fast_Sel : Bool;   // FALSE=slow ramp, TRUE=fast ramp
+      U_nom_kV : Real;   // kV, POC nominal voltage — U_pu = U_meas / U_nom_kV for SMA envelope ── U Control (mode 3) tuning — SCADA-writable ────────────────────────── Starting values derived from grid SSC = 700 MVA, U_nom = 110 kV. Kp = 0.2 × SSC×1000/U_nom = 2000 kVAr/kV; Ti = 20 s → Ki = Kp/Ti = 100.
+      U_Kp : Real;   // kVAr/kV, proportional gain
+      U_Ki : Real;   // kVAr/(kV·s), integral gain (Ti = 20 s)
+      U_Kd : Real;   // kVAr·s/kV, derivative gain (0 = disabled)
+      U_Kd_Tfilt : Real;   // s, derivative low-pass filter time constant
+      U_deadband_kV : Real;   // kV, voltage deadband (±) — covers VT noise + tap steps
+      U_Tt : Real;   // s, anti-windup tracking time constant (= Ti)
+      PID_Reset : Bool;   // write TRUE to reset integrator; FB_PPC_Controller auto-clears ── Q capability diagnostics (written by FB, SCADA-readable) ─────────────
+      Q_max_inductive : Real;   // kVAr, inductive capability at current P (ISCE Test 8)
+      Q_max_capacitive : Real;   // kVAr, capacitive capability at current P (ISCE Test 8)
+      Q_limited : Bool;   // TRUE: Q command was clamped by P-Q envelope
+      Q_setpoint_final : Real;   // kVAr, Q output after ramp + P-Q clamp (debug mirror)
+      SMA_Qmax_plant : Real;   // kVAr, SMA physical Q limit at current P/U (Stage 2, diagnostic)
+      Q_SMA_limited : Bool;   // TRUE: Q clamped by SMA physical envelope (Stage 2) ── U Control (mode 3) diagnostics (written by FB, SCADA-readable) ──────
+      U_error_kV : Real;   // kV, voltage error after deadband (sign = U_spt − U_meas)
+      PID_I_term : Real;   // kVAr, integrator accumulator (wind-up visibility)
+      PID_saturated : Bool;   // TRUE: PID output clamped by Q capability limits this scan
+      PID_active : Bool;   // TRUE: VArControl_Mode = 3 executing this scan ── Operator commands (SCADA-writable) ──────────────────────────────────
+      ResetToDefaults : Bool;   // Rising edge: call FC_PPC_InitData (restore all defaults). OB30 self-clears this after one cycle. ── Simulation mode (SCADA-writable) ────────────────────────────────────
+      Sim_Mode : Bool;   // TRUE: bypass hardware checks (comms, switchgear, faults) Forces all inverters Enabled/RemReady/no faults, WAval=100%, all Skids ELECTRIC_OK=TRUE. ForceStop and FALLBACK still active.
+   END_VAR
+
+
+BEGIN
+   Inverters.PPC_Inverters[0].PF_excitation := 1041;
+   Inverters.PPC_Inverters[1].PF_excitation := 1041;
+   Inverters.PPC_Inverters[2].PF_excitation := 1041;
+   Inverters.PPC_Inverters[3].PF_excitation := 1041;
+   Inverters.PPC_Inverters[4].PF_excitation := 1041;
+   Inverters.PPC_Inverters[5].PF_excitation := 1041;
+   Inverters.PPC_Inverters[6].PF_excitation := 1041;
+   Inverters.PPC_Inverters[7].PF_excitation := 1041;
+   Inverters.PPC_Inverters[8].PF_excitation := 1041;
+   Inverters.PPC_Inverters[9].PF_excitation := 1041;
+   P_RampUp := 1000.0;
+   P_RampDown := 1000.0;
+   WRtg_kW := 4600.0;
+   f_nom := 50.0;
+   Pn_MW := 46.0;
+   Droop_OF_pct := 8.0;
+   Droop_UF_pct := 10.0;
+   DeadBand_mHz := 200.0;
+   Pmin_stab := 0.0;
+   OFRT_Trip_Hz := 51.5;
+   UFRT_Trip_Hz := 47.5;
+   U_Droop_pct := 5.0;
+   U_nom_kV := 110.0;
+   U_Kp := 2000.0;
+   U_Ki := 100.0;
+   U_Kd := 0.0;
+   U_Kd_Tfilt := 0.5;
+   U_deadband_kV := 0.3;
+   U_Tt := 20.0;
+
+END_DATA_BLOCK
+

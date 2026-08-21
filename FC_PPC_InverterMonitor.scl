@@ -18,7 +18,7 @@
 //   RemReady         — inverter feedback reports remote-ready (read from OpStt)
 //   NOT Error        — no active inverter fault (ErrStt = Ok)
 //   NOT CommError    — Modbus communication is healthy (set by comms block)
-//   PwrOffReas = 0   — inverter did not disconnect abnormally
+//   PwrOffReas = 21603 — SMA "No Power Off Reason" (idle/normal); any other code = disconnection event
 //   ELECTRIC_OK      — switchgear breaker/separator/earthing status OK
 //                       (SKID_ELECTRIC DB, written by FC_SkidElectricStatus)
 //
@@ -83,7 +83,7 @@ BEGIN
            AND #Inverters[#i].RemReady             // Inverter reports remote-ready
            AND NOT #Inverters[#i].Error            // No active inverter fault
            AND NOT #Inverters[#i].CommError        // Modbus link is healthy
-           AND (#Inverters[#i].PwrOffReas = 0)     // No abnormal disconnection reason
+           AND (#Inverters[#i].PwrOffReas = 21603)  // 21603 = No Power Off Reason (SMA idle/normal)
            AND #SkidElectric[#i].ELECTRIC_OK;      // Switchgear breaker/sep/earth OK
 
         IF #Inverters[#i].Available THEN

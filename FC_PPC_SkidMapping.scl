@@ -129,8 +129,9 @@ BEGIN
     #Inverter.VArAval := REAL_TO_DINT(#SkidInverter.VArAval * 10000.0);
 
     // ── Disconnection reason ──────────────────────────────────────────────────
-    // 0 = no disconnection event.  Non-zero = reason code (e.g. 21626 = low setpoint).
-    // FaultHandler marks the inverter unavailable when PwrOffReas ≠ 0.
+    // 21603 = no disconnection event (SMA "No Power Off Reason" idle value).
+    // Any other code = disconnection reason (e.g. 21626 = low setpoint).
+    // InverterMonitor marks the inverter unavailable when PwrOffReas ≠ 21603.
     #Inverter.PwrOffReas := #SkidInverter.PwrOffReas;
 
     // ── Derating state ────────────────────────────────────────────────────────

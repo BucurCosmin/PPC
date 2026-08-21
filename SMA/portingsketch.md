@@ -37,8 +37,8 @@ Addresses below are **0-based PDU** (SMA convention: "4xxxx" = 40000 + PDU addr,
 | PF excitation | (not separate) | UID2 | **25** | U32 | 1 | ENUM |
 | VolNomSpt | (not available) | UID2 | **1263** | U16 | 10000 | `p.u. × 10000` |
 | HzNomSpt | (not available) | UID2 | **1261** | U32 | 1000 | `Hz × 1000` |
-| WSptMax | (not available) | UID2 | **4039** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` |
-| WSptMin | (not available) | UID2 | **4041** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` |
+| WSptMax | (not available) | UID2 | **4039** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` — range 0% to +100% |
+| WSptMin | (not available) | UID2 | **4041** | S32 | 100 | `(kW / WExlSpt_RefVal_kW) × 10000` — range **-100% to +100%** (negative = load/charge mode) |
 
 > **FIX2 scaling confirmed from v2.0 p.21:** scaling = 100 → 100.00% = raw 10000, -50.00% = raw -5000. Both WSpt and VArSpt are S16, adjacent registers → **write both in ONE FC16 frame** (addr=22, len=2).
 
@@ -162,8 +162,8 @@ VolNomSpt       : Word     // U16 FIX4 p.u. — for UID2 write
 
 Fields to verify / add:
 ```
-WSptMax         : Real     // plant P ceiling from grid operator (kW, maps → UID2 WSptMax)
-WSptMin         : Real     // plant P floor (kW, maps → UID2 WSptMin)
+WSptMax         : Real     // plant P ceiling from grid operator (kW, maps → UID2 addr 4039, S32 FIX2 %)
+WSptMin         : Real     // plant P floor kW — can be negative for load/charge mode (maps → UID2 addr 4041, S32 FIX2 %)
 ExtdFlbStt      : DInt     // fallback status passthrough
 WSptMin_fdbk    : Real     // effective Pmin readback (for dispatcher)
 WSptMax_fdbk    : Real     // effective Pmax readback (for dispatcher)
