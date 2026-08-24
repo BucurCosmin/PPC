@@ -1,4 +1,4 @@
-﻿FUNCTION_BLOCK "FB_PPC_QCapability"
+FUNCTION_BLOCK "FB_PPC_QCapability"
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.1
 // =============================================================================
@@ -205,7 +205,7 @@ BEGIN
 	            // Bumpless transfer INTO mode 3:
 	            // Pre-load I so first PID output â‰ˆ current ramp state â€” no Q jump.
 	            // Q_unsat = KpÃ—e + I  â†’  I_init = Ramps_Qcmd âˆ’ KpÃ—(U_meas âˆ’ U_spt)
-	            #PID_I      := #Ramps_Qcmd - #U_Kp * (#U_meas - #U_setpoint_ext);
+	            #PID_I      := #Ramps_Qcmd - #U_Kp * (#U_setpoint_ext - #U_meas);   // [CHANGED MOD_U_SIGN]
 	            #PID_D_filt := 0.0;
 	        ELSIF #Control_Mode = 4 OR #Control_Mode = 5 THEN   // [ADDED MOD_POC_PF / MOD_POC_Q_CL]
 	            // Bumpless INTO mode 4: pre-load integrator = current ramp state.
@@ -242,9 +242,10 @@ BEGIN
 	
 	        3:  // â”€â”€ Mode 3: U Control â€” PI(D) voltage regulator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	            // â‘  Error with symmetric deadband
-	            // Convention: positive Q = inductive (absorb) â†’ to raise voltage (U_meas < U_spt)
+	            // MV busbar: absorbing inductive Q (positive) raises MV voltage via transformer impedance. [CHANGED MOD_U_SIGN]
+	            // Undervoltage (U_spt > U_meas) -> positive error -> positive Q command.
 	            // we need negative Q (capacitive, inject) â†’ error = U_meas âˆ’ U_spt
-	            #U_err := #U_meas - #U_setpoint_ext;
+	            #U_err := #U_setpoint_ext - #U_meas;   // [CHANGED MOD_U_SIGN] was U_meas-U_spt (wrong for MV bus control)
 	            IF ABS(#U_err) < #U_deadband_kV THEN
 	                #U_err := 0.0;
 	            END_IF;

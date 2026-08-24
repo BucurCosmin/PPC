@@ -83,7 +83,15 @@ BEGIN
 	    "PPC_Controller".Q_Ramp_Fast_Sel  := TRUE;    // Start with fast ramp; operator can switch slow
 
 	    // [ADDED MOD_POC_PF] Mode 4 POC PF closed-loop PI defaults
-	    "PPC_Controller".PF_poc_target := 1.0;    // unity PF - safe initial default
+	
+    // [ADDED MOD_U_SIGN] U Control (mode 3) PID defaults
+    "PPC_Controller".U_Kp          := 0.0;     // kVAr/kV  - start as pure integrator
+    "PPC_Controller".U_Ki          := 300.0;   // kVAr/(kV.s) - ~30s settling for 0.2 kV error
+    "PPC_Controller".U_Kd          := 0.0;     // derivative off
+    "PPC_Controller".U_Kd_Tfilt    := 0.0;     // derivative filter off
+    "PPC_Controller".U_deadband_kV := 0.1;     // kV, +/-100 V dead zone
+    "PPC_Controller".U_Tt          := 10.0;    // s, anti-windup tracking
+    "PPC_Controller".PF_poc_target := 1.0;    // unity PF - safe initial default
 	    "PPC_Controller".PF_Kp         := 0.0;    // pure integrator to start
 	    "PPC_Controller".PF_Ki         := 0.05;   // 1/s - corrected; Ki=50 was wrong (see tuning notes in FC_PPC_InitData.md)
 	    "PPC_Controller".PF_Tt         := 5.0;    // s, anti-windup time constant
