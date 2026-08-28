@@ -84,6 +84,18 @@ BEGIN
 
 	    // [ADDED MOD_POC_PF] Mode 4 POC PF closed-loop PI defaults
 	
+    // [ADDED MOD_P_SCALE] DBScalesPower defaults — 1.0 = full share, reduce for underperforming inverters
+    "DBScalesPower".P_Scale[0] := 1.0;
+    "DBScalesPower".P_Scale[1] := 1.0;
+    "DBScalesPower".P_Scale[2] := 1.0;
+    "DBScalesPower".P_Scale[3] := 1.0;
+    "DBScalesPower".P_Scale[4] := 1.0;
+    "DBScalesPower".P_Scale[5] := 1.0;
+    "DBScalesPower".P_Scale[6] := 1.0;
+    "DBScalesPower".P_Scale[7] := 1.0;
+    "DBScalesPower".P_Scale[8] := 1.0;
+    "DBScalesPower".P_Scale[9] := 1.0;
+
     // [ADDED MOD_U_SIGN] U Control (mode 3) PID defaults
     "PPC_Controller".U_Kp          := 0.0;     // kVAr/kV  - start as pure integrator
     "PPC_Controller".U_Ki          := 300.0;   // kVAr/(kV.s) - ~30s settling for 0.2 kV error

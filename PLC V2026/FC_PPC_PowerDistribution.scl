@@ -1,4 +1,4 @@
-﻿FUNCTION "FC_PPC_PowerDistribution" : Void
+FUNCTION "FC_PPC_PowerDistribution" : Void
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.1
 // =============================================================================
@@ -68,7 +68,7 @@ VERSION : 0.1
 
    VAR_TEMP 
       i : Int;   // Loop index
-      sumWAval_raw : DInt;   // Sum of raw WAval DInt for all online inverters
+      sumWAval_raw : Real;   // [CHANGED MOD_P_SCALE] was DInt, now Real to allow coefficient multiply   // Sum of raw WAval DInt for all online inverters
       share : Real;   // This inverter's fraction of total available power
       onlineAndOk : Bool;   // Reusable online-check result for this inverter slot
       debug1 : DInt;
@@ -96,9 +96,9 @@ BEGIN
 	            AND (#Inverters[#i].PwrOffReas = 21603 OR #Inverters[#i].PwrOffReas = 21626)
 	        THEN
 	            IF #Inverters[#i].WAval > 0 THEN
-	                #sumWAval_raw += #Inverters[#i].WAval;
+	                #sumWAval_raw += DINT_TO_REAL(#Inverters[#i].WAval) * "DBScalesPower".P_Scale[#i];   // [ADDED MOD_P_SCALE]
 	            ELSE
-	                #sumWAval_raw += 10000;  // standby fallback — equal share
+	                #sumWAval_raw += 10000.0;   // [CHANGED MOD_P_SCALE] standby fallback, Real literal  // standby fallback — equal share
 	            END_IF;
 	            //#sumWAval_raw := #sumWAval_raw + #Inverters[#i].WAval;
 	        END_IF;
@@ -120,9 +120,10 @@ BEGIN
 	            //#share := DINT_TO_REAL(#Inverters[#i].WAval)
 	                      /// DINT_TO_REAL(#sumWAval_raw);
 	            IF #Inverters[#i].WAval > 0 THEN
-	                #share := DINT_TO_REAL(#Inverters[#i].WAval) / DINT_TO_REAL(#sumWAval_raw);
+	                #share := DINT_TO_REAL(#Inverters[#i].WAval) * "DBScalesPower".P_Scale[#i]
+                          / #sumWAval_raw;   // [CHANGED MOD_P_SCALE]
 	            ELSE
-	                #share := 10000.0 / DINT_TO_REAL(#sumWAval_raw);
+	                #share := 10000.0 / #sumWAval_raw;   // [CHANGED MOD_P_SCALE] sumWAval_raw now Real
 	            END_IF;
 	            #Inverters[#i].WSpt := REAL_TO_DINT(#Ramps_Pcmd * #share);
 	
