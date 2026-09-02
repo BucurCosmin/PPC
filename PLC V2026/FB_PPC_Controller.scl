@@ -147,8 +147,10 @@ VERSION : 0.1
       FaultMask : Word;
       P_final_kW : Real;   // kW, after droop correction (FreqResp output â†’ PowerDist input)
       Q_final_kVAr : Real;   // kVAr, after P-Q clamp (QCap output â†’ ReactiveCtrl input)
-      i_sim : Int;   // loop index for Sim_Mode override
-      U_pu : Real;   // grid voltage in per-unit (U_meas / U_nom_kV) â†’ SMA envelope lookup
+      i_sim     : Int;   // loop index for Sim_Mode override
+      i_pf      : Int;   // [ADDED MOD_PF_FF] loop index for Qactive sum
+      Q_inv_sum : Real;  // [ADDED MOD_PF_FF] accumulator for online inverter Qactive total (kVAr)
+      U_pu      : Real;  // grid voltage in per-unit (U_meas / U_nom_kV)â†’ SMA envelope lookup
    END_VAR
 
 
@@ -337,6 +339,15 @@ BEGIN
 	        #U_pu := 1.0;
 	    END_IF;
 	
+	    // [ADDED MOD_PF_FF] Sum online inverter Qactive for Mode 4 feedforward cable compensation
+	    #Q_inv_sum := 0.0;
+	    FOR #i_pf := 0 TO 9 DO
+	        IF "PPC_Controller".Inverters.PPC_Inverters[#i_pf].Available THEN
+	            #Q_inv_sum += DINT_TO_REAL("PPC_Controller".Inverters.PPC_Inverters[#i_pf].Qactive);
+	        END_IF;
+	    END_FOR;
+	    "DB_PFcontrol".Q_inv_total_kVAr := #Q_inv_sum;
+
 	    #QCap_IDB(
 	        P_actual_kW      := #P_actual_kW,
 	        P_setpoint_kW    := #P_final_kW,

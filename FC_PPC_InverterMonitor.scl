@@ -83,7 +83,8 @@ BEGIN
            AND #Inverters[#i].RemReady             // Inverter reports remote-ready
            AND NOT #Inverters[#i].Error            // No active inverter fault
            AND NOT #Inverters[#i].CommError        // Modbus link is healthy
-           AND (#Inverters[#i].PwrOffReas = 21603)  // 21603 = No Power Off Reason (SMA idle/normal)
+           AND (#Inverters[#i].PwrOffReas = 21603    // 21603 = No Power Off Reason (SMA idle/normal)
+             OR #Inverters[#i].PwrOffReas = 21626) // [ADDED MOD_WAITAC] 21626 = LowPowerSetpoint (reported during WaitAC state)
            AND #SkidElectric[#i].ELECTRIC_OK;      // Switchgear breaker/sep/earth OK
 
         IF #Inverters[#i].Available THEN

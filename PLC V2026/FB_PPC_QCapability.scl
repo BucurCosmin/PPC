@@ -1,4 +1,4 @@
-FUNCTION_BLOCK "FB_PPC_QCapability"
+﻿FUNCTION_BLOCK "FB_PPC_QCapability"
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.1
 // =============================================================================
@@ -288,57 +288,56 @@ BEGIN
 	                #PID_I := #PID_I + #U_Ki * #U_err * #CycleTime_s;
 	            END_IF;
 	
-	            // Monitoring outputs
+	            // [ADDED MOD_U_WINDUP] Hard clamp PID_I to capability limits - prevents deep windup
+            // when setpoint is unreachable. Back-calculation handles normal saturation;
+            // this handles the pathological case where PID_I winds far beyond output limits.
+            IF #PID_I > #Q_cap_interp THEN #PID_I := #Q_cap_interp; END_IF;
+            IF #PID_I < -#Q_ind_interp THEN #PID_I := -#Q_ind_interp; END_IF;
+
+            // Monitoring outputs
 	            #U_error_kV := #U_err;
 	            #PID_I_term := #PID_I;
 	            #PID_active  := TRUE;
 	
-	    // [ADDED MOD_POC_PF] Mode 4: POC PF closed-loop PI
-	    4:
-	        // Q_poc_required = P_poc x tan(arccos(|PF_target|)) x sign(PF_target)
-	        // Q_error = Q_poc_required - Q_poc_measured; PI integrator -> Q_cmd
-	        // Sign: PF_poc_target positive = overexcited (inject vars) = negative Q
-	        #PF_abs := ABS(#PF_poc_target);
-	        IF #PF_abs > 0.1 AND #PF_abs <= 1.0 AND #P_poc_kW > 0.0 THEN
-	            #Q_poc_req := -(#P_poc_kW * SQRT(1.0 - #PF_abs * #PF_abs) / #PF_abs);
-	            IF #PF_poc_target < 0.0 THEN #Q_poc_req := -#Q_poc_req; END_IF;
-	        ELSE
-	            #Q_poc_req := 0.0;
-	        END_IF;
-	        // Q error: positive = plant producing too little capacitive Q
-	        #Q_err_pf := #Q_poc_req - #Q_poc_kVAr;
-	        // PI output (unsaturated)
-	        #PF_unsat := #PF_Kp * #Q_err_pf + #PF_I;
-	        // Saturate to Stage 1 P-Q capability limits
-	        IF #PF_unsat > #Q_cap_interp THEN
-	            #Q_command := #Q_cap_interp;
-	        ELSIF #PF_unsat < -#Q_ind_interp THEN
-	            #Q_command := -#Q_ind_interp;
-	        ELSE
-	            #Q_command := #PF_unsat;
-	        END_IF;
-	        // Anti-windup: back-calculation (same structure as Mode 3)
-	        IF #PF_Tt > 0.0 THEN
-	            #PF_I := #PF_I + #PF_Ki * #Q_err_pf * #CycleTime_s
-	                   + (#CycleTime_s / #PF_Tt) * (#Q_command - #PF_unsat);
-	        ELSE
-	            #PF_I := #PF_I + #PF_Ki * #Q_err_pf * #CycleTime_s;
-	        END_IF;
-	        // Diagnostic outputs
-	        #Q_poc_required := #Q_poc_req;
-	        #Q_poc_error    := #Q_err_pf;
-	        IF #P_poc_kW > 0.0 THEN
-	            #S_poc := SQRT(#P_poc_kW * #P_poc_kW + #Q_poc_kVAr * #Q_poc_kVAr);
-	            IF #S_poc > 0.0 THEN
-	                #PF_poc_actual := #P_poc_kW / #S_poc;
-	            ELSE
-	                #PF_poc_actual := 1.0;
-	            END_IF;
-	        ELSE
-	            #PF_poc_actual := 0.0;
-	        END_IF;
+	    // [CHANGED MOD_POC_PF->MOD_PF_FF] Mode 4: POC PF feedforward - direct calculation, no PI
+    // Q_cable estimated real-time from (Q_poc - Q_inv_total), LP filtered in DB_PFcontrol.
+    4:
+        // LP filter Q_cable estimate - state persists in DB_PFcontrol between scans
+        IF "DB_PFcontrol".Q_cable_Tfilt_s > 0.0 THEN
+            "DB_PFcontrol".Q_cable_filt_kVAr +=
+                (#CycleTime_s / "DB_PFcontrol".Q_cable_Tfilt_s)
+                * ((#Q_poc_kVAr - "DB_PFcontrol".Q_inv_total_kVAr)
+                   - "DB_PFcontrol".Q_cable_filt_kVAr);
+        ELSE
+            "DB_PFcontrol".Q_cable_filt_kVAr := #Q_poc_kVAr - "DB_PFcontrol".Q_inv_total_kVAr;
+        END_IF;
+        // Target Q at POC from PF setpoint and measured P at POC
+        #PF_abs := ABS("DB_PFcontrol".PF_poc_target);
+        IF #PF_abs > 0.1 AND #PF_abs <= 1.0 AND #P_poc_kW > 0.0 THEN
+            #Q_poc_req := -(#P_poc_kW * SQRT(1.0 - #PF_abs * #PF_abs) / #PF_abs);
+            IF "DB_PFcontrol".PF_poc_target < 0.0 THEN #Q_poc_req := -#Q_poc_req; END_IF;
+        ELSE
+            #Q_poc_req := 0.0;
+        END_IF;
+        // Feedforward: inverter Q = target POC Q minus cable capacitive contribution
+        #Q_command := #Q_poc_req - "DB_PFcontrol".Q_cable_filt_kVAr;
+        // Diagnostics written to DB_PFcontrol and existing FB outputs
+        "DB_PFcontrol".Q_poc_target_kVAr := #Q_poc_req;
+        IF #P_poc_kW > 0.0 THEN
+            #S_poc := SQRT(#P_poc_kW * #P_poc_kW + #Q_poc_kVAr * #Q_poc_kVAr);
+            IF #S_poc > 0.0 THEN
+                "DB_PFcontrol".PF_poc_actual := #P_poc_kW / #S_poc;
+            ELSE
+                "DB_PFcontrol".PF_poc_actual := 1.0;
+            END_IF;
+        ELSE
+            "DB_PFcontrol".PF_poc_actual := 0.0;
+        END_IF;
+        #Q_poc_required := #Q_poc_req;
+        #Q_poc_error    := #Q_poc_req - #Q_poc_kVAr;
+        #PF_poc_actual  := "DB_PFcontrol".PF_poc_actual;
 
-	    // [ADDED MOD_POC_Q_CL] Mode 5: Fixed Q at POC closed-loop PI
+    // [ADDED MOD_POC_Q_CL] Mode 5: Fixed Q at POC closed-loop PI
 	    // Same PI structure as Mode 4 but target = Q_setpoint_ext directly (not from PF).
 	    // Drives Q_poc_kVAr toward Cmd_Q. Reuses PF_I, PF_Kp, PF_Ki, PF_Tt.
 	    5:
