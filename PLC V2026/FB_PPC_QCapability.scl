@@ -180,6 +180,42 @@ BEGIN
 	
 	    #Q_max_inductive  := #Q_ind_interp;
 	    #Q_max_capacitive := #Q_cap_interp;
+
+	    // KeepPF - PF floor for U control (mode 3) and POC Q PI (mode 5)
+	    // [ADDED MOD_KEEPPF]
+	    // PF = P / sqrt(P^2 + Q^2) >= PF_min  =>  |Q| <= P * sqrt(1-PF_min^2) / PF_min
+	    //
+	    // Placed here, right after the capability limits are final, so every
+	    // downstream consumer inherits it: mode 3 PID saturation AND its PID_I hard
+	    // clamp, mode 5 PI saturation and anti-windup, and the Stage 1 clamp.
+	    // Applying it any later would let the mode 3 integrator wind up against a
+	    // limit it cannot see.
+	    //
+	    // AFTER Q_max_inductive/Q_max_capacitive are published, so those SCADA
+	    // outputs keep reporting the true ANRE P-Q envelope (ISCE Test 8).
+	    //
+	    // Mode 4 excluded - it already targets PF_poc_target as a setpoint.
+	    // Bypassed below KeepPF_Pmin_kW to preserve zero-P reactive capability
+	    // (Art. 150/152, ISCE Test 10). ABS() because the limit is symmetric -
+	    // the sign of PF_poc_target only selects direction for mode 4.
+	    #PF_abs := ABS("DB_PFcontrol".PF_poc_target);
+	    IF "DB_PFcontrol".KeepPF
+	       AND (#Control_Mode = 3 OR #Control_Mode = 5)
+	       AND #PF_abs > 0.1 AND #PF_abs <= 1.0
+	       AND #P_poc_kW > "DB_PFcontrol".KeepPF_Pmin_kW
+	    THEN
+	        "DB_PFcontrol".KeepPF_Qlimit_kVAr :=
+	            #P_poc_kW * SQRT(1.0 - #PF_abs * #PF_abs) / #PF_abs;
+	        IF #Q_cap_interp > "DB_PFcontrol".KeepPF_Qlimit_kVAr THEN
+	            #Q_cap_interp := "DB_PFcontrol".KeepPF_Qlimit_kVAr;
+	        END_IF;
+	        IF #Q_ind_interp > "DB_PFcontrol".KeepPF_Qlimit_kVAr THEN
+	            #Q_ind_interp := "DB_PFcontrol".KeepPF_Qlimit_kVAr;
+	        END_IF;
+	        "DB_PFcontrol".KeepPF_Active := TRUE;
+	    ELSE
+	        "DB_PFcontrol".KeepPF_Active := FALSE;
+	    END_IF;
 	
 	    // â”€â”€ U Control (mode 3) PID state management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	    // Default diagnostic outputs; mode 3 CASE block overrides when active.

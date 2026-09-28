@@ -489,15 +489,16 @@ Returns immediately in FALLBACK — FaultHandler owns safe-state writes.
 
 **Purpose:** Runs last. Overrides setpoints written by steps ⑥/⑦ for faulted / stopped / disconnected inverters. Writes `OperMode` to keep healthy inverters in Operation.
 
-**Per-inverter logic (five cases, strict priority):**
+**Per-inverter logic (six cases, strict priority):**
 
 | Priority | Condition | Action |
 |---|---|---|
 | A | `ForceStop OR Plant_Mode = 2` | Stop ALL: OperMode=303, WSpt=0, VArSpt=0, WMode=303, VArMode=303, ErrClr=0 |
 | B | `CommError = TRUE` | Same stop writes; AnyFault=TRUE; FaultMask bit set |
 | C | `Error = TRUE` | Zero WSpt/VArSpt/PFSpt/ErrClr; AnyFault=TRUE; FaultMask bit set; OperMode not written |
-| D | Healthy, `PwrOffReas ≠ 0 OR NOT ELECTRIC_OK` | OperMode=308; zero setpoints; AnyFault=TRUE (belt-and-suspenders vs InverterMonitor.Available) |
-| E | Fully healthy | OperMode=308; ErrClr one-shot on Error↓ edge; DrtStt≠0 → AnyDerating=TRUE |
+| D | `Enabled = FALSE` (comms healthy, no fault) | **Hand back to local control:** OperMode=308, **WMode=1077 (WCtlMan)**, **VArMode=1071 (VArCtlMan)**, WSpt=0, VArSpt=0, PFSpt=0, ErrClr=0. AnyFault NOT set — operator-disable is not a fault. The inverter follows its own local HMI setpoints, not the PPC. 303 (Off) would release control and let it revert to MPP; 1079/1072 would keep it following Modbus. Steps ⑥/⑦ set 1079/303 — this step runs last and overrides. **Depends on the `Enabled` write-gate being removed from FB16**, otherwise the mode change is never transmitted. |
+| E | Healthy, `PwrOffReas ≠ 0 OR NOT ELECTRIC_OK` | OperMode=308; zero setpoints; AnyFault=TRUE (belt-and-suspenders vs InverterMonitor.Available) |
+| F | Fully healthy | OperMode=308; ErrClr one-shot on Error↓ edge; DrtStt≠0 → AnyDerating=TRUE |
 
 **ErrClr one-shot (sequence S3.3):** Write 26 (Ackn) for exactly one scan when Error transitions 1→0 (fault cleared). Also re-sent when `Enabled` rises while Error is clear (M6 fix: handles case where one-shot fired while disabled).
 

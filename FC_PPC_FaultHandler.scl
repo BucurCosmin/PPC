@@ -9,7 +9,7 @@
 //   Also writes OperMode to healthy inverters to keep them in Operation and
 //   to recover them after a fault or stop.
 //
-// FIVE CONDITIONS HANDLED PER INVERTER:
+// SIX CONDITIONS HANDLED PER INVERTER:
 //
 //   A) ForceStop = TRUE (EN_PPC = FALSE in the calling FB)
 //      → Stop ALL inverters immediately regardless of health.
@@ -25,7 +25,21 @@
 //      → Zero setpoints for this inverter. Set AnyFault and FaultMask bit.
 //      → Do not acknowledge while fault is active (ErrClr = 0).
 //
-//   E) Healthy inverter (no globalStop, no CommError, no Error)
+//   E) Operator-disabled (Enabled = FALSE, comms healthy, no fault)
+//      → HAND BACK TO LOCAL CONTROL: OperMode stays 308, but the control-mode
+//        registers switch to manual so the inverter follows its own local HMI
+//        setpoints instead of the PPC:
+//          WMod   1077 = WCtlMan    (was 1079 WCtlCom)
+//          VArMod 1071 = VArCtlMan  (was 303 Off)
+//        303 (Off) is wrong here — it releases control and the inverter reverts
+//        to MPP tracking. 1079/1072 are wrong too — it would keep following
+//        Modbus. Upstream FCs set 1079/303; this FC runs last so these win.
+//      → Not a fault: AnyFault and FaultMask are left untouched.
+//      → DEPENDS ON FB16: its Modbus write phase must NOT be gated on Enabled,
+//        otherwise the mode change is never transmitted and the inverter keeps
+//        running under whatever mode it last received.
+//
+//   F) Healthy inverter (no globalStop, no CommError, no Error)
 //      → Write OperMode=308 to keep in Operation (idempotent).
 //      → ErrClr one-shot (sequence S3.3): write 26 (Ackn) exactly once
 //        when Error transitions 1→0. PrevError array (passed from FB static)
@@ -169,6 +183,31 @@ BEGIN
             #Inverters[#i].ErrClr  := 0;
             #AnyFault  := TRUE;
             #FaultMask := #FaultMask OR SHL(IN := WORD#1, N := INT_TO_UINT(#i));
+
+        ELSIF NOT #Inverters[#i].Enabled THEN
+            // ── OPERATOR-DISABLED — HAND BACK TO LOCAL CONTROL ────────────────
+            // [ADDED MOD_DISABLE_PARK]
+            // "Disabled" means this inverter is no longer under PPC control — it
+            // is handed back to its own local HMI setpoints, not switched off.
+            //
+            // Mode values matter here (SMA ENUM, Modbus_Comms_Mapping §2.3):
+            //   WMod   1077 = WCtlMan   — active power via local HMI
+            //   VArMod 1071 = VArCtlMan — reactive power via local HMI
+            // NOT 303 (Off), which releases control entirely and lets the
+            // inverter revert to MPP tracking, and NOT 1079/1072 (CtlCom),
+            // which would keep it following Modbus setpoints.
+            //
+            // Upstream FCs set these to 1079 / 303; this FC runs last, so the
+            // assignments here win.
+            //
+            // Operator-disable is not a fault — AnyFault / FaultMask untouched.
+            #Inverters[#i].OperMode := 308;    // stay in Operation
+            #Inverters[#i].WMode    := 1077;   // WCtlMan — local HMI active power
+            #Inverters[#i].WSpt     := 0;      // PPC commands nothing
+            #Inverters[#i].VArMode  := 1071;   // VArCtlMan — local HMI reactive power
+            #Inverters[#i].VArSpt   := 0;
+            #Inverters[#i].PFSpt    := 0;
+            #Inverters[#i].ErrClr   := 0;
 
         ELSE
             // ── HEALTHY INVERTER ──────────────────────────────────────────────
